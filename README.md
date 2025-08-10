@@ -9,7 +9,7 @@ Công cụ này được phát triển để **nhận dạng văn bản và bả
 * **Fine-tune model tiếng Việt**: Mô hình recognition trong repo là bản đã được huấn luyện lại với từ điển và dataset tiếng Việt.
 * **Xử lý bảng nâng cao**: Kết hợp module Table Recognition của PaddleOCR và xử lý hậu kỳ để tái tạo bảng dưới dạng Markdown/HTML.
 * **Pipeline hoàn chỉnh**: Từ ảnh đầu vào → nhận dạng layout → nhận dạng văn bản và bảng → xuất Markdown.
-* **Hiệu năng tối ưu**: Hỗ trợ GPU qua PaddlePaddle-GPU, có thể xử lý batch hoặc ảnh đơn.
+* **Hiệu năng tối ưu**: Hỗ trợ GPU qua PaddlePaddle-GPU.
 
 ## 3. Hướng dẫn cài đặt
 
