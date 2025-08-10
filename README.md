@@ -1,46 +1,49 @@
-# Image → Markdown
+# 📄 Image → Markdown
 
-## 1. Tổng quan
+## 1️⃣ Tổng quan
 
-Công cụ cho phép **nhận dạng văn bản và bảng từ ảnh tài liệu tiếng Việt**, sau đó tự động chuyển đổi sang định dạng Markdown.
-Hệ thống sử dụng **mô hình PaddleOCR đã được fine-tune chuyên biệt cho tiếng Việt**, giúp nhận diện chính xác dấu câu, ký tự đặc thù và cấu trúc phức tạp của tài liệu.
+**Image → Markdown** là công cụ giúp **nhận dạng văn bản và bảng từ ảnh tài liệu tiếng Việt** với độ chính xác cao, sau đó tự động chuyển đổi sang định dạng Markdown.
+Nhờ sử dụng **mô hình PaddleOCR đã fine-tune chuyên biệt cho tiếng Việt**, hệ thống nhận diện tốt dấu câu, ký tự đặc thù và cả cấu trúc tài liệu phức tạp.
 
-Bảng biểu được xử lý bằng **mô-đun nhận diện cell có sẵn của PaddleOCR**, sau đó sử dụng **tool tự phát triển** để sinh HTML từ bounding box của cell và nhúng trực tiếp vào file Markdown. Cách tiếp cận này giúp tái tạo chính xác cấu trúc bảng (hàng, cột, ô gộp) và hiển thị đúng layout trong trình đọc Markdown hỗ trợ HTML.
+📊 **Bảng biểu** được phát hiện bằng **mô-đun cell detection của PaddleOCR**. Sau đó, công cụ **tự phát triển** sẽ:
 
-## 2. Điểm nổi bật
+* Chuyển bounding box cell → HTML `<table>`
+* Giữ nguyên hàng, cột, ô gộp
+* Nhúng HTML trực tiếp vào Markdown để hiển thị đúng layout.
 
-* **Fine-tune model tiếng Việt**: Mô hình recognition đã được huấn luyện lại với từ điển và dataset tiếng Việt.
-* **Xử lý bảng nâng cao**: Kết hợp module Table Recognition của PaddleOCR và xử lý hậu kỳ để tái tạo bảng dưới dạng Markdown/HTML.
-* **Pipeline hoàn chỉnh**: Ảnh đầu vào → nhận dạng layout → nhận dạng văn bản và bảng → xuất Markdown.
-* **Hiệu năng tối ưu**: Hỗ trợ GPU qua PaddlePaddle-GPU.
+---
 
-## 3. Hướng dẫn cài đặt
+## ✨ Điểm nổi bật
 
-### 3.1 Tạo và kích hoạt môi trường ảo bằng pip (khuyến nghị)
+* 🚀 **Fine-tune model tiếng Việt** — Huấn luyện lại với từ điển & dataset tiếng Việt.
+* 🗂 **Xử lý bảng nâng cao** — Kết hợp Table Recognition + hậu xử lý tái tạo bảng chuẩn HTML/Markdown.
+* 🔄 **Pipeline hoàn chỉnh** — Ảnh đầu vào → layout detection → OCR → xuất Markdown.
+* ⚡ **Hiệu năng tối ưu** — Hỗ trợ GPU qua PaddlePaddle-GPU.
+
+---
+
+## 🛠 Hướng dẫn cài đặt
+
+### 3.1 Tạo & kích hoạt môi trường ảo (khuyến nghị)
 
 ```bash
-# Tạo môi trường ảo
 python -m venv venv
 
-# Kích hoạt môi trường ảo
 # Windows
 venv\Scripts\activate
 # Linux / macOS
 source venv/bin/activate
 
-# Cập nhật pip lên bản mới nhất
 pip install --upgrade pip
 ```
 
-### 3.2 Cài PaddlePaddle GPU (khuyến nghị)
-
-Nếu dùng CUDA 11.8:
+### 3.2 Cài PaddlePaddle GPU (nếu dùng CUDA 11.8)
 
 ```bash
 pip install paddlepaddle-gpu==3.1.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
 ```
 
-Nếu không dùng CUDA 11.8 hoặc sử dụng CPU, vui lòng truy cập **[trang cài đặt PaddlePaddle](https://www.paddlepaddle.org.cn/en/install/quick?docurl=/documentation/docs/en/develop/install/pip/windows-pip_en.html)** để chọn phiên bản phù hợp.
+Hoặc [chọn phiên bản khác tại đây](https://www.paddlepaddle.org.cn/en/install/quick?docurl=/documentation/docs/en/develop/install/pip/windows-pip_en.html).
 
 ### 3.3 Cài thư viện Python cần thiết
 
@@ -48,24 +51,26 @@ Nếu không dùng CUDA 11.8 hoặc sử dụng CPU, vui lòng truy cập **[tra
 pip install -r requirements.txt
 ```
 
-## 4. Hướng dẫn sử dụng
+---
 
-Chạy script **main.py**:
+## ▶ Hướng dẫn sử dụng
 
 ```bash
 python main.py
 ```
 
-Pipeline sẽ thực hiện:
+Pipeline sẽ tự động:
 
-1. Nhận diện layout tài liệu (heading, paragraph, table...).
-2. Nhận dạng văn bản và bảng bằng mô hình tiếng Việt đã fine-tune.
-3. Sinh HTML bảng từ cell box và nhúng vào Markdown.
-4. Xuất kết quả ra file `.md`.
+1. 📐 Nhận diện layout (heading, paragraph, table...)
+2. 🔍 Nhận dạng văn bản & bảng bằng model tiếng Việt
+3. 🧩 Sinh HTML bảng từ cell boxes → nhúng vào Markdown
+4. 💾 Xuất kết quả `.md`
 
-## 5. Dataset
+---
 
-* **Nguồn dữ liệu**: Bộ dữ liệu tự thu thập từ nhiều nguồn public.
-* **Quy mô**: Khoảng **450.000 ảnh public** và **150.000 ảnh sinh thêm** để cân bằng phân bố ký tự.
-* **Mục tiêu**: Đảm bảo mô hình nhận dạng tốt các dạng chữ, dấu tiếng Việt.
-* **Liên hệ**: Nếu cần dataset, vui lòng liên hệ email **[trainguyenchi30@gmail.com](mailto:trainguyenchi30@gmail.com)**.
+## 📚 Dataset
+
+* **Nguồn**: Tự thu thập từ nhiều nguồn public.
+* **Quy mô**: \~450.000 ảnh public + 150.000 ảnh sinh thêm.
+* **Mục tiêu**: Tối ưu nhận dạng tiếng Việt với nhiều loại ký tự & dấu câu.
+* **Liên hệ**: [trainguyenchi30@gmail.com](mailto:trainguyenchi30@gmail.com)
