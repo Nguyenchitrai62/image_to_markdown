@@ -37,7 +37,7 @@ Nếu dùng CUDA 11.8:
 pip install paddlepaddle-gpu==3.1.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/
 ```
 
-Nếu không dùng CUDA 11.8 hoặc sử dụng CPU, vui lòng truy cập **[trang cài đặt PaddlePaddle](https://www.paddlepaddle.org.cn/en/install/quick?docurl=/documentation/docs/en/develop/install/pip/windows-pip_en.html)** để chọn phiên bản phù hợp.
+Nếu không dùng CUDA 11.8 hoặc sử dụng CPU, vui lòng truy cập tại **[đây](https://www.paddlepaddle.org.cn/en/install/quick?docurl=/documentation/docs/en/develop/install/pip/windows-pip_en.html)** để chọn phiên bản phù hợp.
 
 ### 3.3 Cài thư viện Python cần thiết
 
