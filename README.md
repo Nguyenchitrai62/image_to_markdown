@@ -1,4 +1,4 @@
-# (Image → Markdown)
+# Image → Markdown
 
 ## 1. Tổng quan
 
