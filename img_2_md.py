@@ -8,7 +8,7 @@ from typing import List, Dict, Tuple, Any
 # Import các module của bạn
 from det_rec_preprocess import run_det_rec_preprocess, initialize_ocr
 from layout_detection import run_layout_detection, initialize_layout_detector
-from table_procesing import table_image_to_markdown 
+from table_procesing import table_image_to_markdown, initialize_cell_detector
 from xycut import recursive_xy_cut, points_to_bbox
     
 class DocumentProcessor:
@@ -18,11 +18,22 @@ class DocumentProcessor:
         """Khởi tạo các model cần thiết"""
         load_start = time.time()
         
+        print("Đang khởi tạo các model...")
+        
+        # Khởi tạo OCR model
+        print("- Đang khởi tạo OCR model...")
         self.ocr_model = initialize_ocr()
+        
+        # Khởi tạo Layout Detection model
+        print("- Đang khởi tạo Layout Detection model...")
         self.layout_model = initialize_layout_detector()
         
+        # Khởi tạo Cell Detection model
+        print("- Đang khởi tạo Cell Detection model...")
+        self.cell_model = initialize_cell_detector()
+        
         load_time = time.time() - load_start
-        print(f"Model load time: {load_time:.2f}s")
+        print(f"Tất cả model đã được khởi tạo thành công trong {load_time:.2f}s")
     
     def is_point_in_box(self, point, box):
         """Kiểm tra điểm có nằm trong box không"""
@@ -213,10 +224,14 @@ class DocumentProcessor:
         # Bước 4: Tạo các content sections với đúng vị trí
         content_sections = []
         
-        # 4.1: Xử lý table regions
+        # 4.1: Xử lý table regions với cell model đã được khởi tạo
         for i, table_region in enumerate(table_regions):
             try:
-                table_markdown = table_image_to_markdown(table_region['image'])
+                # Sử dụng cell_model đã được khởi tạo trong __init__
+                table_markdown = table_image_to_markdown(
+                    table_region['image'], 
+                    cell_model=self.cell_model
+                )
                 content_sections.append({
                     'type': 'table',
                     'content': table_markdown,
@@ -225,7 +240,15 @@ class DocumentProcessor:
                     'index': i + 1
                 })
             except Exception as e:
-                pass
+                print(f"Lỗi khi xử lý table {i+1}: {e}")
+                # Fallback: tạo placeholder table
+                content_sections.append({
+                    'type': 'table',
+                    'content': '<table border="1"><tr><td>Error processing table</td></tr></table>',
+                    'bbox': table_region['bbox'],
+                    'y_position': table_region['bbox'][1],
+                    'index': i + 1
+                })
         
         # 4.2: Xử lý image regions
         for i, image_region in enumerate(image_regions):
@@ -241,7 +264,7 @@ class DocumentProcessor:
                     'index': i + 1
                 })
             except Exception as e:
-                pass
+                print(f"Lỗi khi xử lý image {i+1}: {e}")
         
         # 4.3: Xử lý free text blocks với XY-Cut
         free_texts = text_classification['free_texts']
@@ -288,7 +311,7 @@ class DocumentProcessor:
         
         # Tổng thời gian xử lý
         total_process_time = time.time() - process_start_time
-        print(f"{base_name} - OCR: {step1_time:.2f}s | Layout: {step2_time:.2f}s | Processing: {step3_time:.2f}s | Markdown: {step5_time:.2f}s | Total: {total_process_time:.2f}s")
+        print(f"{base_name} - OCR: {step1_time:.2f}s | Layout: {step2_time:.2f}s | Table: {step3_time:.2f}s | Markdown: {step5_time:.2f}s | Total: {total_process_time:.2f}s")
         
         return markdown_path
     
@@ -299,13 +322,16 @@ class DocumentProcessor:
         
         for i, image_path in enumerate(image_paths, 1):
             if not os.path.exists(image_path):
+                print(f"File không tồn tại: {image_path}")
                 continue
                 
             try:
+                print(f"Đang xử lý ({i}/{len(image_paths)}): {os.path.basename(image_path)}")
                 result_path = self.process_document(image_path, output_dir)
                 results.append(result_path)
                     
             except Exception as e:
+                print(f"Lỗi khi xử lý {image_path}: {e}")
                 import traceback
                 traceback.print_exc()
         
@@ -388,6 +414,7 @@ class DocumentProcessor:
                 sorted_texts = self.sort_texts_by_position(texts)
                 
         except Exception as e:
+            print(f"XY-Cut failed, using fallback sorting: {e}")
             # Fallback về sắp xếp đơn giản nếu XY-Cut thất bại
             sorted_texts = self.sort_texts_by_position(texts)
         
@@ -477,8 +504,10 @@ if __name__ == "__main__":
         print("No valid image files found!")
         exit()
     
+    print(f"Tìm thấy {len(existing_images)} ảnh để xử lý")
+    
     # Tạo processor một lần, xử lý nhiều ảnh
-    processor = DocumentProcessor()  # Load model chỉ một lần ở đây!
+    processor = DocumentProcessor()  # Load tất cả model chỉ một lần ở đây!
     results = processor.process_multiple_documents(existing_images, "./output/")
     
-    print(f"Completed! Created {len(results)} markdown files.")
+    print(f"Hoàn thành! Đã tạo {len(results)} file markdown.")

@@ -2,22 +2,17 @@ import cv2
 import numpy as np
 from paddleocr import TableCellsDetection
 from collections import defaultdict
+from det_rec_preprocess import get_text
 
-# Import hàm OCR từ ocr.py
-try:
-    from det_rec_preprocess import get_text
-except ImportError:
-    get_text = None
 
-# Global model instance - load once
-_cell_model = None
-
-def get_cell_model():
-    """Get or initialize the cell detection model (singleton pattern)"""
-    global _cell_model
-    if _cell_model is None:
-        _cell_model = TableCellsDetection(model_name="RT-DETR-L_wired_table_cell_det")
-    return _cell_model
+def initialize_cell_detector():
+    """Khởi tạo PaddleOCR TableCellsDetection"""
+    print("Đang khởi tạo Cell Detection model...")
+    
+    cell_model = TableCellsDetection(model_name="RT-DETR-L_wired_table_cell_det")
+    
+    print("Cell Detection model đã được khởi tạo thành công!")
+    return cell_model
 
 def calculate_auto_tolerance(cell_boxes, tolerance_ratio=0.5):
     """
@@ -437,18 +432,23 @@ def generate_html_table(table_matrix, total_rows, total_columns):
     
     return '\n'.join(html_lines)
 
-def table_image_to_markdown(image_input, cell_threshold=0.7, tolerance_ratio=0.5):
+def table_image_to_markdown(image_input, cell_model=None, cell_threshold=0.7, tolerance_ratio=0.5):
     """
     Chuyển đổi ảnh table thành markdown string
     
     Args:
         image_input: Đường dẫn ảnh hoặc numpy array
+        cell_model: Model cell detection đã được khởi tạo (nếu None sẽ báo lỗi)
         cell_threshold: Ngưỡng confidence cho cell detection
         tolerance_ratio: Tỷ lệ để tính tolerance tự động
         
     Returns:
         str: Nội dung markdown (HTML table)
     """
+    
+    # Kiểm tra cell_model
+    if cell_model is None:
+        raise ValueError("cell_model không được để None. Hãy khởi tạo cell_model trước khi gọi hàm này.")
     
     # Đọc ảnh
     if isinstance(image_input, str):
@@ -470,10 +470,7 @@ def table_image_to_markdown(image_input, cell_threshold=0.7, tolerance_ratio=0.5
         raise ValueError("image_input must be either a file path or numpy array")
     
     try:
-        # Sử dụng singleton model
-        cell_model = get_cell_model()
-        
-        # Detect cells
+        # Sử dụng cell_model đã được truyền vào
         cell_output = cell_model.predict(working_image_path, threshold=cell_threshold, batch_size=1)
         original_cells = cell_output[0]["boxes"] if cell_output else []
         
@@ -523,16 +520,20 @@ def table_image_to_markdown(image_input, cell_threshold=0.7, tolerance_ratio=0.5
                 pass
 
 # Alias cho function name ngắn hơn
-def process_table_image(image_input, **kwargs):
+def process_table_image(image_input, cell_model=None, **kwargs):
     """Alias cho table_image_to_markdown"""
-    return table_image_to_markdown(image_input, **kwargs)
+    return table_image_to_markdown(image_input, cell_model, **kwargs)
 
 if __name__ == "__main__":
     # Test với ảnh mẫu
     image_path = "./cropped_boxes/table_0.jpg"
     
     try:
-        markdown_result = table_image_to_markdown(image_path)
+        # Khởi tạo cell model một lần
+        cell_model = initialize_cell_detector()
+        
+        # Sử dụng model để xử lý
+        markdown_result = table_image_to_markdown(image_path, cell_model)
         print("Generated Markdown Table:")
         print("=" * 50)
         print(markdown_result)
