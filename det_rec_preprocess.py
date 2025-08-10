@@ -284,12 +284,12 @@ def preprocess_non_text_areas(img, text_mask):
     
     return output
 
-def run_det_rec_preprocess(image_path, ocr_model=None):
+def run_det_rec_preprocess(image_input, ocr_model=None):
     """
     Hàm chính: Xử lý ảnh với OCR và sắp xếp text theo XY-Cut
     
     Args:
-        image_path (str): Đường dẫn đến ảnh
+        image_input (str or np.ndarray): Đường dẫn ảnh hoặc numpy array ảnh
         ocr_model: OCR model (deprecated - sẽ sử dụng global instance)
     
     Returns:
@@ -298,12 +298,24 @@ def run_det_rec_preprocess(image_path, ocr_model=None):
     # Sử dụng global OCR instance thay vì parameter
     ocr = get_ocr_instance()
     
-    img = cv2.imread(image_path)
-    if img is None:
-        raise ValueError(f"Không thể đọc ảnh: {image_path}")
+    # Kiểm tra đầu vào là path hay numpy array
+    if isinstance(image_input, str):
+        # Input là đường dẫn file
+        if not os.path.exists(image_input):
+            raise FileNotFoundError(f"Không thể tìm thấy file: {image_input}")
+        img = cv2.imread(image_input)
+        if img is None:
+            raise ValueError(f"Không thể đọc ảnh: {image_input}")
+        input_data = image_input
+    elif isinstance(image_input, np.ndarray):
+        # Input là numpy array
+        img = image_input.copy()
+        input_data = image_input
+    else:
+        raise TypeError("image_input phải là đường dẫn (str) hoặc ảnh numpy array (np.ndarray)")
     
     # Chạy OCR
-    result = ocr.predict(input=image_path)
+    result = ocr.predict(input=input_data)
     
     all_texts_with_info = []
     all_boxes = []
