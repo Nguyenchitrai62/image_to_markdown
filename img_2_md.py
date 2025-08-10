@@ -8,23 +8,21 @@ from typing import List, Dict, Tuple, Any
 # Import các module của bạn
 from det_rec_preprocess import run_det_rec_preprocess, initialize_ocr
 from layout_detection import run_layout_detection, initialize_layout_detector
-from test import table_image_to_markdown  # Giả sử function này có trong test.py
-from xycut import recursive_xy_cut, points_to_bbox  # Import XY-Cut functions
+from table_procesing import table_image_to_markdown 
+from xycut import recursive_xy_cut, points_to_bbox
     
 class DocumentProcessor:
     """Class chính để xử lý pipeline tài liệu với layout-aware processing"""
     
     def __init__(self):
         """Khởi tạo các model cần thiết"""
-        print("🔧 Khởi tạo các model...")
         load_start = time.time()
         
         self.ocr_model = initialize_ocr()
         self.layout_model = initialize_layout_detector()
         
         load_time = time.time() - load_start
-        print(f"✅ Hoàn thành khởi tạo! Thời gian load model: {load_time:.2f}s")
-        print("🚀 Sẵn sàng xử lý nhiều tài liệu!\n")
+        print(f"Model load time: {load_time:.2f}s")
     
     def is_point_in_box(self, point, box):
         """Kiểm tra điểm có nằm trong box không"""
@@ -176,11 +174,9 @@ class DocumentProcessor:
         os.makedirs(output_dir, exist_ok=True)
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         
-        print(f"🚀 Bắt đầu xử lý: {image_path}")
         process_start_time = time.time()
         
         # Bước 1: Tiền xử lý ảnh với OCR
-        print("📝 Bước 1: Chạy det_rec_preprocess...")
         step1_start = time.time()
         
         processed_image, all_texts, all_boxes = run_det_rec_preprocess(
@@ -189,15 +185,12 @@ class DocumentProcessor:
         )
         
         step1_time = time.time() - step1_start
-        print(f"   ⏱️ Thời gian bước 1: {step1_time:.2f}s")
-        print(f"   📝 Tổng số text được detect: {len(all_texts)}")
         
         # Lưu ảnh đã tiền xử lý
         processed_image_path = os.path.join(output_dir, f"{base_name}_processed.jpg")
         cv2.imwrite(processed_image_path, processed_image)
         
         # Bước 2: Layout detection
-        print("🔍 Bước 2: Chạy layout_detection...")
         step2_start = time.time()
         
         original_img, layout_regions, layout_boxes = run_layout_detection(
@@ -211,28 +204,16 @@ class DocumentProcessor:
         other_regions = [region for region in layout_regions if region['label'] not in ['table', 'image']]
         
         step2_time = time.time() - step2_start
-        print(f"   ⏱️ Thời gian bước 2: {step2_time:.2f}s")
-        print(f"   📊 Layout detection kết quả:")
-        print(f"      - Table regions: {len(table_regions)}")
-        print(f"      - Image regions: {len(image_regions)}")
-        print(f"      - Other regions: {len(other_regions)}")
         
         # Bước 3: Phân loại text theo layout regions
-        print("⚙️ Bước 3: Phân loại text theo layout regions...")
         step3_start = time.time()
         
         text_classification = self.classify_texts_by_layout_regions(all_texts, layout_regions)
-        
-        print(f"   📝 Text classification:")
-        print(f"      - Free texts: {len(text_classification['free_texts'])}")
-        print(f"      - Texts in tables: {len(text_classification['texts_in_tables'])}")
-        print(f"      - Texts in images (ignored): {len(text_classification['texts_in_images'])}")
         
         # Bước 4: Tạo các content sections với đúng vị trí
         content_sections = []
         
         # 4.1: Xử lý table regions
-        print(f"   🔄 Xử lý {len(table_regions)} table regions...")
         for i, table_region in enumerate(table_regions):
             try:
                 table_markdown = table_image_to_markdown(table_region['image'])
@@ -243,12 +224,10 @@ class DocumentProcessor:
                     'y_position': table_region['bbox'][1],  # y_min để sắp xếp
                     'index': i + 1
                 })
-                print(f"      ✅ Table {i+1} processed")
             except Exception as e:
-                print(f"      ❌ Lỗi khi xử lý table {i+1}: {str(e)}")
+                pass
         
         # 4.2: Xử lý image regions
-        print(f"   🖼️ Xử lý {len(image_regions)} image regions...")
         for i, image_region in enumerate(image_regions):
             try:
                 image_filename, image_path = self.save_image_region(
@@ -261,16 +240,13 @@ class DocumentProcessor:
                     'y_position': image_region['bbox'][1],  # y_min để sắp xếp
                     'index': i + 1
                 })
-                print(f"      ✅ Image {i+1} saved as {image_filename}")
             except Exception as e:
-                print(f"      ❌ Lỗi khi xử lý image {i+1}: {str(e)}")
+                pass
         
         # 4.3: Xử lý free text blocks với XY-Cut
         free_texts = text_classification['free_texts']
         if free_texts:
-            print(f"   📄 Xử lý {len(free_texts)} free texts với XY-Cut...")
             text_blocks = self.create_text_blocks_from_free_texts(free_texts, layout_regions)
-            print(f"   📦 Tạo được {len(text_blocks)} text blocks")
             
             for i, text_block in enumerate(text_blocks):
                 # Tính vị trí trung bình của block
@@ -295,10 +271,8 @@ class DocumentProcessor:
                     })
         
         step3_time = time.time() - step3_start
-        print(f"   ⏱️ Thời gian bước 3-4: {step3_time:.2f}s")
         
         # Bước 5: Sắp xếp và tạo markdown cuối
-        print("📋 Bước 5: Tạo markdown với layout đúng vị trí...")
         step5_start = time.time()
         
         markdown_content = self.create_layout_aware_markdown(
@@ -311,12 +285,10 @@ class DocumentProcessor:
             f.write(markdown_content)
         
         step5_time = time.time() - step5_start
-        print(f"   ⏱️ Thời gian bước 5: {step5_time:.2f}s")
         
         # Tổng thời gian xử lý
         total_process_time = time.time() - process_start_time
-        print(f"⏱️ Tổng thời gian xử lý: {total_process_time:.2f}s")
-        print(f"✅ Hoàn thành! Markdown saved: {markdown_path}\n")
+        print(f"{base_name} - OCR: {step1_time:.2f}s | Layout: {step2_time:.2f}s | Processing: {step3_time:.2f}s | Markdown: {step5_time:.2f}s | Total: {total_process_time:.2f}s")
         
         return markdown_path
     
@@ -325,41 +297,20 @@ class DocumentProcessor:
         results = []
         total_start_time = time.time()
         
-        print(f"📚 Bắt đầu xử lý {len(image_paths)} tài liệu...")
-        print(f"{'='*60}")
-        
         for i, image_path in enumerate(image_paths, 1):
             if not os.path.exists(image_path):
-                print(f"⚠️ File không tồn tại: {image_path}")
                 continue
                 
-            print(f"\n📄 Tài liệu {i}/{len(image_paths)}: {os.path.basename(image_path)}")
-            print("-" * 50)
-            
             try:
                 result_path = self.process_document(image_path, output_dir)
                 results.append(result_path)
-                
-                # Hiển thị preview nội dung
-                with open(result_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    print(f"📖 Preview markdown:")
-                    preview = content[:300] + "..." if len(content) > 300 else content
-                    print(preview)
-                    print("-" * 30)
                     
             except Exception as e:
-                print(f"❌ Lỗi khi xử lý {image_path}: {str(e)}")
                 import traceback
                 traceback.print_exc()
         
         total_time = time.time() - total_start_time
-        print(f"\n🏁 Hoàn thành tất cả!")
-        print(f"📊 Thống kê:")
-        print(f"   - Tổng thời gian: {total_time:.2f}s")
-        print(f"   - Số tài liệu thành công: {len(results)}/{len(image_paths)}")
-        print(f"   - Thời gian trung bình/tài liệu: {total_time/max(len(results), 1):.2f}s")
-        print(f"   - Kết quả lưu tại: {output_dir}")
+        print(f"Total processing time: {total_time:.2f}s | Documents: {len(results)}/{len(image_paths)} | Average: {total_time/max(len(results), 1):.2f}s per document")
         
         return results
     
@@ -400,7 +351,6 @@ class DocumentProcessor:
             return result
             
         except Exception as e:
-            print(f"      ⚠️ Error converting bbox format: {e}")
             return [0, 0, 100, 100]  # Safe fallback
 
     def sort_texts_with_xycut(self, texts):
@@ -435,11 +385,9 @@ class DocumentProcessor:
                 sorted_texts = [texts[i] for i in reading_order]
             else:
                 # Fallback về sắp xếp đơn giản nếu XY-Cut không trả về kết quả
-                print("      ⚠️ XY-Cut không trả về kết quả, sử dụng fallback sorting")
                 sorted_texts = self.sort_texts_by_position(texts)
                 
         except Exception as e:
-            print(f"      ⚠️ XY-Cut error: {str(e)}, sử dụng fallback sorting")
             # Fallback về sắp xếp đơn giản nếu XY-Cut thất bại
             sorted_texts = self.sort_texts_by_position(texts)
         
@@ -507,8 +455,6 @@ def process_multiple_documents_optimized(image_paths: List[str], output_dir: str
 # CÁCH SỬ DỤNG:
 
 if __name__ == "__main__":
-    print("=== XỬ LÝ TÀI LIỆU VỚI LAYOUT-AWARE PROCESSING ===")
-    
     # Danh sách các ảnh test
     test_images = [
         "./anh_test/1.jpg",
@@ -528,15 +474,11 @@ if __name__ == "__main__":
     existing_images = [img for img in test_images if os.path.exists(img)]
     
     if not existing_images:
-        print("❌ Không tìm thấy file ảnh nào!")
+        print("No valid image files found!")
         exit()
-    
-    print(f"✅ Tìm thấy {len(existing_images)} file ảnh hợp lệ")
     
     # Tạo processor một lần, xử lý nhiều ảnh
     processor = DocumentProcessor()  # Load model chỉ một lần ở đây!
     results = processor.process_multiple_documents(existing_images, "./output/")
     
-    print(f"\n🎉 Hoàn thành! Đã tạo {len(results)} file markdown:")
-    for result in results:
-        print(f"   📄 {result}")
+    print(f"Completed! Created {len(results)} markdown files.")
