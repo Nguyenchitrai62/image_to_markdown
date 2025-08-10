@@ -9,6 +9,7 @@ from typing import List, Dict, Tuple, Any
 from det_rec_preprocess import run_det_rec_preprocess, initialize_ocr
 from layout_detection import run_layout_detection, initialize_layout_detector
 from table_procesing import table_image_to_markdown, initialize_cell_detector
+from ori import run_orientation_correction, initialize_orientation_classifier
 from xycut import recursive_xy_cut, points_to_bbox
     
 class DocumentProcessor:
@@ -19,6 +20,10 @@ class DocumentProcessor:
         load_start = time.time()
         
         print("Đang khởi tạo các model...")
+        
+        # Khởi tạo Orientation Classifier model
+        print("- Đang khởi tạo Orientation Classifier model...")
+        self.orientation_model = initialize_orientation_classifier()
         
         # Khởi tạo OCR model
         print("- Đang khởi tạo OCR model...")
@@ -187,11 +192,21 @@ class DocumentProcessor:
         
         process_start_time = time.time()
         
-        # Bước 1: Tiền xử lý ảnh với OCR
+        # Bước 0: Orientation correction (THÊM MỚI)
+        step0_start = time.time()
+        
+        corrected_image, orientation_info = run_orientation_correction(
+            image_path, 
+            self.orientation_model
+        )
+        
+        step0_time = time.time() - step0_start
+        
+        # Bước 1: Tiền xử lý ảnh với OCR (sử dụng ảnh đã xoay)
         step1_start = time.time()
         
         processed_image, all_texts, all_boxes = run_det_rec_preprocess(
-            image_path, 
+            corrected_image,  # Sử dụng numpy array ảnh đã xoay trực tiếp
             self.ocr_model
         )
         
@@ -201,7 +216,7 @@ class DocumentProcessor:
         processed_image_path = os.path.join(output_dir, f"{base_name}_processed.jpg")
         cv2.imwrite(processed_image_path, processed_image)
         
-        # Bước 2: Layout detection
+        # Bước 2: Layout detection (sử dụng ảnh đã xử lý)
         step2_start = time.time()
         
         original_img, layout_regions, layout_boxes = run_layout_detection(
@@ -309,9 +324,9 @@ class DocumentProcessor:
         
         step5_time = time.time() - step5_start
         
-        # Tổng thời gian xử lý
+        # Tổng thời gian xử lý (cập nhật để bao gồm orientation correction)
         total_process_time = time.time() - process_start_time
-        print(f"{base_name} - OCR: {step1_time:.2f}s | Layout: {step2_time:.2f}s | Table: {step3_time:.2f}s | Markdown: {step5_time:.2f}s | Total: {total_process_time:.2f}s")
+        print(f"{base_name} - Orientation: {step0_time:.2f}s | OCR: {step1_time:.2f}s | Layout: {step2_time:.2f}s | Table: {step3_time:.2f}s | Markdown: {step5_time:.2f}s | Total: {total_process_time:.2f}s")
         
         return markdown_path
     
