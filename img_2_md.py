@@ -478,9 +478,12 @@ class DocumentProcessor:
             
             # Thêm khoảng trắng giữa các sections (trừ section cuối)
             if i < len(sorted_sections) - 1:
-                markdown_lines.append("")
+                next_type = sorted_sections[i+1]['type']
+                # Chỉ thêm dòng trống nếu loại khác nhau
+                if section_type != next_type:
+                    markdown_lines.append("")
         
-        return '\n\n'.join(markdown_lines)
+        return '\n'.join(markdown_lines)
 
 # UTILITY FUNCTIONS
 
