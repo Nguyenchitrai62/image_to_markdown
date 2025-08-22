@@ -4,7 +4,6 @@ from paddleocr import PaddleOCR
 import json
 import os
 from typing import List, Dict, Tuple, Any
-from PIL import Image, ImageDraw, ImageFont
 from googletrans import Translator
 import time
 
@@ -322,147 +321,13 @@ def translate_text(text, src_lang="ja", dest_lang="vi", max_retries=3):
     
     return text
 
-def get_optimal_font_size(text, bbox_width, bbox_height, font_path, min_size=12, max_size=60):
+def process_image_to_json(image_input, 
+                         src_lang="ja",
+                         dest_lang="vi",
+                         output_json_path=None,
+                         save_debug_image=False):
     """
-    Tính toán font size tối ưu để text vừa với bounding box
-    
-    Args:
-        text: Text cần vẽ
-        bbox_width: Chiều rộng bbox
-        bbox_height: Chiều cao bbox
-        font_path: Đường dẫn font
-        min_size: Font size tối thiểu
-        max_size: Font size tối đa
-        
-    Returns:
-        int: Font size tối ưu
-    """
-    if not text:
-        return min_size
-    
-    # Binary search để tìm font size tối ưu
-    left, right = min_size, max_size
-    optimal_size = min_size
-    
-    while left <= right:
-        mid_size = (left + right) // 2
-        try:
-            font = ImageFont.truetype(font_path, mid_size)
-            
-            # Tính kích thước text với font size hiện tại
-            bbox = font.getbbox(text)
-            text_width = bbox[2] - bbox[0]
-            text_height = bbox[3] - bbox[1]
-            
-            # Kiểm tra text có vừa trong bbox không (với margin 10%)
-            margin_width = bbox_width * 0.1
-            margin_height = bbox_height * 0.1
-            
-            if (text_width <= bbox_width - margin_width and 
-                text_height <= bbox_height - margin_height):
-                optimal_size = mid_size
-                left = mid_size + 1
-            else:
-                right = mid_size - 1
-                
-        except Exception:
-            right = mid_size - 1
-    
-    return max(optimal_size, min_size)
-
-def draw_text_on_image(image, text_infos_with_translation, font_path="C:/Windows/Fonts/times.ttf"):
-    """
-    Vẽ text đã dịch lên ảnh với nền trắng
-    
-    Args:
-        image: PIL Image object
-        text_infos_with_translation: List các text info đã có translation
-        font_path: Đường dẫn đến font
-        
-    Returns:
-        PIL Image: Ảnh đã vẽ text
-    """
-    img_with_text = image.copy()
-    draw = ImageDraw.Draw(img_with_text)
-    
-    # Kiểm tra font có tồn tại không
-    if not os.path.exists(font_path):
-        print(f"⚠️ Font không tồn tại: {font_path}")
-        print("Sử dụng font mặc định")
-        font_path = None
-    
-    for i, text_info in enumerate(text_infos_with_translation):
-        try:
-            bbox = text_info['bbox']
-            translated_text = text_info.get('translated_text', text_info['text'])
-            
-            # Convert bbox
-            if len(bbox) == 4 and not isinstance(bbox[0], list):
-                x_min, y_min, x_max, y_max = bbox
-            else:
-                converted = convert_bbox_to_xycut_format(bbox)
-                x_min, y_min, x_max, y_max = converted
-            
-            # Tính kích thước bbox
-            bbox_width = x_max - x_min
-            bbox_height = y_max - y_min
-            
-            if bbox_width <= 0 or bbox_height <= 0:
-                continue
-            
-            # Vẽ nền trắng
-            draw.rectangle([x_min, y_min, x_max, y_max], fill='white', outline=None)
-            
-            # Tính font size tối ưu
-            if font_path and os.path.exists(font_path):
-                optimal_font_size = get_optimal_font_size(
-                    translated_text, bbox_width, bbox_height, font_path
-                )
-                font = ImageFont.truetype(font_path, optimal_font_size)
-            else:
-                # Sử dụng font mặc định nếu không tìm thấy font
-                try:
-                    font = ImageFont.load_default()
-                except:
-                    continue
-            
-            # Tính vị trí để center text
-            text_bbox = draw.textbbox((0, 0), translated_text, font=font)
-            text_width = text_bbox[2] - text_bbox[0]
-            text_height = text_bbox[3] - text_bbox[1]
-            
-            # Center text trong bbox
-            text_x = x_min + (bbox_width - text_width) // 2
-            text_y = y_min + (bbox_height - text_height) // 2
-            
-            # Đảm bảo text không vượt ra ngoài bbox
-            text_x = max(x_min, min(text_x, x_max - text_width))
-            text_y = max(y_min, min(text_y, y_max - text_height))
-            
-            # Vẽ text
-            draw.text((text_x, text_y), translated_text, fill='black', font=font)
-            
-            # Vẽ viền để debug (tùy chọn)
-            if text_info.get('is_merged', False):
-                draw.rectangle([x_min, y_min, x_max, y_max], outline='red', width=2)
-            else:
-                draw.rectangle([x_min, y_min, x_max, y_max], outline='blue', width=1)
-                
-        except Exception as e:
-            print(f"⚠️ Lỗi vẽ text {i}: {str(e)}")
-            continue
-    
-    return img_with_text
-
-def process_image_with_translation(image_input, 
-                                   src_lang="ja",
-                                   dest_lang="vi",
-                                   output_json_path=None,
-                                   save_debug_image=False,
-                                   save_translated_image=True,
-                                   font_path="C:/Windows/Fonts/times.ttf"):
-    """
-    Main function: Xử lý ảnh OCR, gộp box, dịch text và vẽ lên ảnh
+    Main function: Xử lý ảnh OCR, gộp box, dịch text và xuất JSON
     
     Args:
         image_input: Đường dẫn ảnh hoặc numpy array
@@ -470,8 +335,6 @@ def process_image_with_translation(image_input,
         dest_lang: Ngôn ngữ đích (mặc định "vi")
         output_json_path: Đường dẫn lưu JSON
         save_debug_image: Có lưu ảnh debug không
-        save_translated_image: Có lưu ảnh đã dịch không
-        font_path: Đường dẫn font
         
     Returns:
         dict: Kết quả xử lý
@@ -491,16 +354,11 @@ def process_image_with_translation(image_input,
             raise FileNotFoundError(f"Ảnh không tồn tại: {image_input}")
         input_data = image_input
         base_name = os.path.splitext(os.path.basename(image_input))[0]
-        # Load ảnh cho việc vẽ
-        original_image = Image.open(image_input)
+        image_path = image_input
     elif isinstance(image_input, np.ndarray):
         input_data = image_input
         base_name = "image_array"
-        # Convert numpy array sang PIL Image
-        if len(image_input.shape) == 3:
-            original_image = Image.fromarray(cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB))
-        else:
-            original_image = Image.fromarray(image_input)
+        image_path = None
     else:
         raise TypeError("image_input phải là đường dẫn hoặc numpy array")
     
@@ -566,6 +424,7 @@ def process_image_with_translation(image_input,
     # Chuẩn bị output data
     output_data = {
         'metadata': {
+            'image_path': image_path,
             'total_original_boxes': len(all_texts_with_info),
             'total_merged_groups': merged_count,
             'total_final_boxes': len(final_sorted_texts),
@@ -608,20 +467,10 @@ def process_image_with_translation(image_input,
     
     print(f"💾 Đã lưu kết quả JSON vào: {output_json_path}")
     
-    # Vẽ text dịch lên ảnh
-    if save_translated_image:
-        print("🎨 Đang vẽ text dịch lên ảnh...")
-        translated_image = draw_text_on_image(original_image, final_sorted_texts, font_path)
-        
-        # Lưu ảnh đã dịch
-        translated_image_path = os.path.join(output_dir, f"{base_name}_translated.jpg")
-        translated_image.save(translated_image_path, quality=95)
-        print(f"🖼️ Đã lưu ảnh dịch vào: {translated_image_path}")
-    
     # Lưu ảnh debug nếu cần
-    if save_debug_image and isinstance(image_input, str):
+    if save_debug_image and image_path:
         debug_image_path = os.path.join(output_dir, f"{base_name}_debug_boxes.jpg")
-        save_debug_visualization(image_input, final_sorted_texts, debug_image_path)
+        save_debug_visualization(image_path, final_sorted_texts, debug_image_path)
         print(f"🖼️ Đã lưu ảnh debug vào: {debug_image_path}")
     
     return output_data
@@ -660,23 +509,21 @@ def save_debug_visualization(image_path, text_infos, output_path):
     cv2.imwrite(output_path, img)
 
 # Test function
-def test_ocr_translation():
-    """Test function với dịch thuật"""
+def test_ocr_to_json():
+    """Test function chỉ xuất JSON"""
     image_path = "./cropped_boxes/Chap189-Page011.jpg"  # Thay đổi path này
     
     if os.path.exists(image_path):
-        print("=== TEST OCR + TRANSLATION + TEXT OVERLAY ===")
+        print("=== TEST OCR TO JSON ===")
         
         # Test dịch từ tiếng Nhật sang tiếng Việt
         print("\n🇯🇵➡️🇻🇳 Xử lý ảnh: Nhật → Việt")
-        result = process_image_with_translation(
+        result = process_image_to_json(
             image_path,
             src_lang="ja",
             dest_lang="vi", 
             output_json_path="translated_ja_to_vi.json",
-            save_debug_image=True,
-            save_translated_image=True,
-            font_path="C:/Windows/Fonts/times.ttf"  # Hoặc arial.ttf
+            save_debug_image=True
         )
         
         print(f"\n📈 Kết quả:")
@@ -692,10 +539,7 @@ def test_ocr_translation():
         translated_text = result['combined_translated_text'][:200] + "..." if len(result['combined_translated_text']) > 200 else result['combined_translated_text']
         print(translated_text)
         
-        print(f"\n💾 Tất cả file output:")
-        print(f"- JSON: ./output/translated_ja_to_vi.json")
-        print(f"- Ảnh dịch: ./output/{os.path.splitext(os.path.basename(image_path))[0]}_translated.jpg")
-        print(f"- Ảnh debug: ./output/{os.path.splitext(os.path.basename(image_path))[0]}_debug_boxes.jpg")
+        print(f"\n💾 File JSON output: ./output/translated_ja_to_vi.json")
         
         # In chi tiết vài text đầu tiên
         print(f"\n🔍 Chi tiết 3 text đầu tiên:")
@@ -706,47 +550,16 @@ def test_ocr_translation():
             print(f"   Merged: {text_data['is_merged']}")
             print()
         
+        return result
+        
     else:
         print(f"❌ File {image_path} không tồn tại")
         print("Tạo thư mục cropped_boxes/ và đặt ảnh test vào đó")
+        return None
 
-def test_other_languages():
-    """Test với các ngôn ngữ khác"""
-    image_path = "./test_images/sample.jpg"  # Thay path phù hợp
-    
-    if os.path.exists(image_path):
-        print("=== TEST CÁC NGÔN NGỮ KHÁC ===")
-        
-        # Test Trung → Việt
-        print("\n🇨🇳➡️🇻🇳 Trung Quốc → Việt Nam")
-        process_image_with_translation(
-            image_path,
-            src_lang="zh",
-            dest_lang="vi",
-            output_json_path="translated_zh_to_vi.json"
-        )
-        
-        # Test Hàn → Việt  
-        print("\n🇰🇷➡️🇻🇳 Hàn Quốc → Việt Nam")
-        process_image_with_translation(
-            image_path,
-            src_lang="ko", 
-            dest_lang="vi",
-            output_json_path="translated_ko_to_vi.json"
-        )
-        
-        # Test Anh → Việt
-        print("\n🇺🇸➡️🇻🇳 Tiếng Anh → Việt Nam") 
-        process_image_with_translation(
-            image_path,
-            src_lang="en",
-            dest_lang="vi",
-            output_json_path="translated_en_to_vi.json"
-        )
-
-def quick_translate_image(image_path, src_lang="ja", dest_lang="vi"):
+def quick_process_to_json(image_path, src_lang="ja", dest_lang="vi"):
     """
-    Hàm nhanh để dịch ảnh với tham số tối thiểu
+    Hàm nhanh để xử lý ảnh ra JSON với tham số tối thiểu
     
     Args:
         image_path: Đường dẫn ảnh
@@ -754,81 +567,26 @@ def quick_translate_image(image_path, src_lang="ja", dest_lang="vi"):
         dest_lang: Ngôn ngữ đích
         
     Returns:
-        str: Đường dẫn ảnh đã dịch
+        str: Đường dẫn file JSON
     """
     if not os.path.exists(image_path):
         raise FileNotFoundError(f"Ảnh không tồn tại: {image_path}")
     
-    print(f"🚀 Dịch nhanh: {src_lang} → {dest_lang}")
+    print(f"🚀 Xử lý nhanh: {src_lang} → {dest_lang}")
     
-    result = process_image_with_translation(
+    result = process_image_to_json(
         image_path,
         src_lang=src_lang,
         dest_lang=dest_lang,
-        save_debug_image=False,
-        save_translated_image=True
+        save_debug_image=False
     )
     
     base_name = os.path.splitext(os.path.basename(image_path))[0]
-    translated_image_path = f"./output/{base_name}_translated.jpg"
+    json_path = f"./output/{base_name}_translated_ocr_result.json"
     
-    print(f"✅ Hoàn thành! Ảnh dịch: {translated_image_path}")
-    return translated_image_path
-
-# Các hàm tiện ích
-def batch_translate_images(image_folder, src_lang="ja", dest_lang="vi"):
-    """
-    Dịch hàng loạt ảnh trong folder
-    
-    Args:
-        image_folder: Đường dẫn folder chứa ảnh
-        src_lang: Ngôn ngữ nguồn  
-        dest_lang: Ngôn ngữ đích
-    """
-    if not os.path.exists(image_folder):
-        print(f"❌ Folder không tồn tại: {image_folder}")
-        return
-    
-    # Tìm tất cả ảnh trong folder
-    image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
-    image_files = []
-    
-    for file in os.listdir(image_folder):
-        if any(file.lower().endswith(ext) for ext in image_extensions):
-            image_files.append(os.path.join(image_folder, file))
-    
-    if not image_files:
-        print(f"❌ Không tìm thấy ảnh nào trong {image_folder}")
-        return
-    
-    print(f"📁 Tìm thấy {len(image_files)} ảnh để dịch")
-    print(f"🌍 Dịch từ {src_lang} sang {dest_lang}")
-    
-    successful = 0
-    failed = 0
-    
-    for i, image_path in enumerate(image_files):
-        try:
-            print(f"\n📸 Đang xử lý {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
-            
-            quick_translate_image(image_path, src_lang, dest_lang)
-            successful += 1
-            
-        except Exception as e:
-            print(f"❌ Lỗi xử lý {os.path.basename(image_path)}: {str(e)}")
-            failed += 1
-    
-    print(f"\n📊 Kết quả batch translation:")
-    print(f"✅ Thành công: {successful}")
-    print(f"❌ Thất bại: {failed}")
-    print(f"📁 Tất cả kết quả trong folder: ./output/")
+    print(f"✅ Hoàn thành! File JSON: {json_path}")
+    return json_path
 
 if __name__ == "__main__":
     # Chạy test cơ bản
-    test_ocr_translation()
-    
-    # Uncomment để test các ngôn ngữ khác
-    # test_other_languages()
-    
-    # Uncomment để test batch processing
-    # batch_translate_images("./test_images/", "ja", "vi")
+    test_ocr_to_json()
