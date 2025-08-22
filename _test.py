@@ -1,803 +1,834 @@
 import cv2
 import numpy as np
-import os
+from paddleocr import PaddleOCR
 import json
+import os
+from typing import List, Dict, Tuple, Any
+from PIL import Image, ImageDraw, ImageFont
+from googletrans import Translator
 import time
-from typing import List, Dict, Tuple, Any, Optional
 
-# Import các module của bạn
-from det_rec_preprocess import run_det_rec_preprocess, initialize_ocr
-from layout_detection import run_layout_detection, initialize_layout_detector
-from table_procesing import table_image_to_markdown, initialize_cell_detector
-from ori import run_orientation_correction, initialize_orientation_classifier
+# Import XY-Cut functions (giả sử đã có)
 from xycut import recursive_xy_cut, points_to_bbox
 
-class ProcessingConfig:
-    """Configuration class để điều khiển việc bật/tắt các module"""
+def calculate_iou(box1, box2):
+    """
+    Tính IoU (Intersection over Union) giữa hai bounding box
     
-    def __init__(self,
-                 orientation: bool = True,
-                 layout_detection: bool = True,
-                 table_processing: bool = True,
-                 text_processing: bool = True,
-                 image_extraction: bool = True,
-                 xy_cut_sorting: bool = True):
-        """
-        Args:
-            orientation: Bật/tắt xác định hướng ảnh
-            layout_detection: Bật/tắt phát hiện layout
-            table_processing: Bật/tắt xử lý bảng
-            text_processing: Bật/tắt xử lý văn bản
-            image_extraction: Bật/tắt trích xuất ảnh
-            xy_cut_sorting: Bật/tắt sắp xếp XY-Cut (fallback về sắp xếp đơn giản)
-        """
-        self.orientation = orientation
-        self.layout_detection = layout_detection
-        self.table_processing = table_processing
-        self.text_processing = text_processing
-        self.image_extraction = image_extraction
-        self.xy_cut_sorting = xy_cut_sorting
+    Args:
+        box1, box2: [x_min, y_min, x_max, y_max] format
         
-    @classmethod
-    def minimal_config(cls):
-        """Config tối thiểu - chỉ OCR cơ bản"""
-        return cls(
-            orientation=False,
-            layout_detection=False,
-            table_processing=False,
-            text_processing=True,
-            image_extraction=False,
-            xy_cut_sorting=False
-        )
+    Returns:
+        float: IoU value (0-1)
+    """
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
     
-    @classmethod
-    def full_config(cls):
-        """Config đầy đủ - tất cả modules"""
-        return cls(
-            orientation=True,
-            layout_detection=True,
-            table_processing=True,
-            text_processing=True,
-            image_extraction=True,
-            xy_cut_sorting=True
-        )
+    if x1 >= x2 or y1 >= y2:
+        return 0.0
     
-    @classmethod
-    def text_only_config(cls):
-        """Config chỉ xử lý text - không xử lý bảng/ảnh"""
-        return cls(
-            orientation=True,
-            layout_detection=False,
-            table_processing=False,
-            text_processing=True,
-            image_extraction=False,
-            xy_cut_sorting=True
-        )
+    intersection = (x2 - x1) * (y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - intersection
+    
+    return intersection / union if union > 0 else 0.0
 
-class DocumentProcessor:
-    """Class chính để xử lý pipeline tài liệu với layout-aware processing"""
+def calculate_overlap_ratio(box1, box2):
+    """
+    Tính tỷ lệ overlap của box nhỏ hơn so với box lớn hơn
     
-    def __init__(self, config: Optional[ProcessingConfig] = None):
-        """
-        Khởi tạo các model cần thiết dựa trên config
+    Args:
+        box1, box2: [x_min, y_min, x_max, y_max] format
         
-        Args:
-            config: ProcessingConfig để điều khiển việc load model nào
-        """
-        if config is None:
-            config = ProcessingConfig.full_config()
-        
-        self.config = config
-        
-        load_start = time.time()
-        print("Đang khởi tạo các model...")
-        
-        # Luôn khởi tạo OCR model (bắt buộc)
-        print("- Đang khởi tạo OCR model...")
-        self.ocr_model = initialize_ocr()
-        
-        # Khởi tạo Orientation Classifier model (tùy chọn)
-        self.orientation_model = None
-        if self.config.orientation:
-            print("- Đang khởi tạo Orientation Classifier model...")
-            self.orientation_model = initialize_orientation_classifier()
-        else:
-            print("- Bỏ qua Orientation Classifier model")
-        
-        # Khởi tạo Layout Detection model (tùy chọn)
-        self.layout_model = None
-        if self.config.layout_detection:
-            print("- Đang khởi tạo Layout Detection model...")
-            self.layout_model = initialize_layout_detector()
-        else:
-            print("- Bỏ qua Layout Detection model")
-        
-        # Khởi tạo Cell Detection model (tùy chọn)
-        self.cell_model = None
-        if self.config.table_processing:
-            print("- Đang khởi tạo Cell Detection model...")
-            self.cell_model = initialize_cell_detector()
-        else:
-            print("- Bỏ qua Cell Detection model")
-        
-        load_time = time.time() - load_start
-        print(f"Các model đã được khởi tạo thành công trong {load_time:.2f}s")
+    Returns:
+        float: Overlap ratio (0-1)
+    """
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
     
-    def is_point_in_box(self, point, box):
-        """Kiểm tra điểm có nằm trong box không"""
-        x, y = point
-        x1, y1, x2, y2 = box
-        return x1 <= x <= x2 and y1 <= y <= y2
+    if x1 >= x2 or y1 >= y2:
+        return 0.0
     
-    def get_text_box_center(self, box):
-        """Lấy tọa độ trung tâm của text bounding box"""
-        if isinstance(box, list) and len(box) == 4:
-            if isinstance(box[0], list):
-                x_coords = [point[0] for point in box]
-                y_coords = [point[1] for point in box]
+    intersection = (x2 - x1) * (y2 - y1)
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    
+    # Tỷ lệ overlap của box nhỏ hơn
+    min_area = min(area1, area2)
+    return intersection / min_area if min_area > 0 else 0.0
+
+def has_intersection(box1, box2):
+    """
+    Kiểm tra hai bounding box có giao nhau không (dù chỉ 1 pixel)
+    
+    Args:
+        box1, box2: [x_min, y_min, x_max, y_max] format
+        
+    Returns:
+        bool: True nếu có giao nhau, False nếu không
+    """
+    x1 = max(box1[0], box2[0])
+    y1 = max(box1[1], box2[1])
+    x2 = min(box1[2], box2[2])
+    y2 = min(box1[3], box2[3])
+    
+    # Có giao nhau nếu x1 < x2 và y1 < y2
+    return x1 < x2 and y1 < y2
+
+def convert_bbox_to_xycut_format(bbox):
+    """
+    Chuyển đổi bbox từ PaddleOCR format sang [x_min, y_min, x_max, y_max]
+    """
+    try:
+        if isinstance(bbox, list) and len(bbox) == 4:
+            if isinstance(bbox[0], list):
+                # Format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+                x_coords = [point[0] for point in bbox]
+                y_coords = [point[1] for point in bbox]
+                result = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
+            else:
+                # Format: [x1, y1, x2, y2]
+                result = bbox
+        elif hasattr(bbox, 'shape') and len(bbox.shape) == 2:
+            # Numpy array shape (4, 2)
+            x_coords = bbox[:, 0]
+            y_coords = bbox[:, 1]
+            result = [np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)]
+        else:
+            # Fallback - convert to numpy and try again
+            bbox_array = np.array(bbox)
+            if bbox_array.shape == (4, 2):
+                x_coords = bbox_array[:, 0]
+                y_coords = bbox_array[:, 1]
+                result = [np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)]
+            elif len(bbox_array) == 8:
+                # Format: [x1,y1,x2,y2,x3,y3,x4,y4]
+                result = points_to_bbox(bbox_array)
+            else:
+                result = [0, 0, 100, 100]
+        
+        # Đảm bảo tất cả giá trị là integers và >= 0
+        result = [max(0, int(x)) for x in result]
+        return result
+        
+    except Exception:
+        return [0, 0, 100, 100]
+
+def find_overlapping_groups(text_infos):
+    """
+    Tìm các nhóm text boxes có chồng lên nhau (bất kỳ mức độ nào)
+    
+    Args:
+        text_infos: List of dict với keys: 'text', 'confidence', 'bbox'
+        
+    Returns:
+        List of lists: Mỗi sublist chứa indices của các box chồng lên nhau
+    """
+    n = len(text_infos)
+    if n == 0:
+        return []
+    
+    # Convert tất cả bbox về định dạng chuẩn
+    boxes = []
+    for info in text_infos:
+        bbox = convert_bbox_to_xycut_format(info['bbox'])
+        boxes.append(bbox)
+    
+    # Tạo ma trận adjacency
+    overlap_matrix = np.zeros((n, n), dtype=bool)
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            # Chỉ cần kiểm tra có giao nhau không (không cần ngưỡng)
+            if has_intersection(boxes[i], boxes[j]):
+                overlap_matrix[i][j] = True
+                overlap_matrix[j][i] = True
+    
+    # Tìm các connected components (nhóm các box chồng lên nhau)
+    visited = [False] * n
+    groups = []
+    
+    def dfs(node, current_group):
+        visited[node] = True
+        current_group.append(node)
+        
+        for neighbor in range(n):
+            if overlap_matrix[node][neighbor] and not visited[neighbor]:
+                dfs(neighbor, current_group)
+    
+    for i in range(n):
+        if not visited[i]:
+            current_group = []
+            dfs(i, current_group)
+            groups.append(current_group)
+    
+    return groups
+
+def merge_overlapping_boxes(text_infos, groups):
+    """
+    Gộp các box overlap thành box lớn và sắp xếp text bằng XY-Cut
+    
+    Args:
+        text_infos: List of text info dicts
+        groups: List of lists, mỗi sublist chứa indices của các box cần gộp
+        
+    Returns:
+        List of merged text info dicts
+    """
+    merged_results = []
+    
+    for group in groups:
+        if len(group) == 1:
+            # Chỉ có 1 box, không cần gộp
+            merged_results.append(text_infos[group[0]])
+        else:
+            # Gộp nhiều box
+            group_texts = []
+            group_confidences = []
+            all_bboxes = []
+            
+            # Collect thông tin của tất cả box trong group
+            for idx in group:
+                info = text_infos[idx]
+                group_texts.append({
+                    'text': info['text'],
+                    'confidence': info['confidence'],
+                    'bbox': info['bbox']
+                })
+                group_confidences.append(info['confidence'])
+                all_bboxes.append(convert_bbox_to_xycut_format(info['bbox']))
+            
+            # Tính bounding box gộp
+            all_bboxes = np.array(all_bboxes)
+            merged_bbox = [
+                int(np.min(all_bboxes[:, 0])),  # x_min
+                int(np.min(all_bboxes[:, 1])),  # y_min
+                int(np.max(all_bboxes[:, 2])),  # x_max
+                int(np.max(all_bboxes[:, 3]))   # y_max
+            ]
+            
+            # Sắp xếp text trong group bằng XY-Cut
+            sorted_group_texts = sort_texts_with_xycut(group_texts)
+            
+            # Gộp text và tính confidence trung bình
+            combined_text = " ".join([t['text'] for t in sorted_group_texts])
+            avg_confidence = np.mean(group_confidences)
+            
+            merged_info = {
+                'text': combined_text,
+                'confidence': float(avg_confidence),
+                'bbox': merged_bbox,
+                'is_merged': True,
+                'merged_from_count': len(group),
+                'original_texts': [t['text'] for t in sorted_group_texts]
+            }
+            
+            merged_results.append(merged_info)
+    
+    return merged_results
+
+def sort_texts_with_xycut(texts_with_info):
+    """
+    Sắp xếp text theo thứ tự đọc sử dụng XY-Cut algorithm
+    """
+    if not texts_with_info:
+        return []
+    
+    # Chuẩn bị dữ liệu cho XY-Cut
+    boxes = []
+    indices = list(range(len(texts_with_info)))
+    
+    for i, text_info in enumerate(texts_with_info):
+        bbox = text_info.get('bbox', [[0, 0], [0, 0], [0, 0], [0, 0]])
+        converted_bbox = convert_bbox_to_xycut_format(bbox)
+        boxes.append(converted_bbox)
+    
+    boxes = np.array(boxes, dtype=np.int32)
+    indices = np.array(indices, dtype=np.int32)
+    
+    if len(boxes) == 0:
+        return []
+    
+    try:
+        # Chạy XY-Cut để lấy thứ tự đọc
+        reading_order = []
+        recursive_xy_cut(boxes, indices, reading_order)
+        
+        # Sắp xếp texts theo thứ tự đọc
+        if reading_order:
+            sorted_texts = [texts_with_info[i] for i in reading_order]
+        else:
+            # Fallback về sắp xếp đơn giản
+            sorted_texts = sort_texts_by_position_fallback(texts_with_info)
+            
+    except Exception:
+        # Fallback về sắp xếp đơn giản
+        sorted_texts = sort_texts_by_position_fallback(texts_with_info)
+    
+    return sorted_texts
+
+def sort_texts_by_position_fallback(texts_with_info):
+    """Fallback sorting method"""
+    def get_sort_key(text_info):
+        bbox = text_info.get('bbox', [[0, 0], [0, 0], [0, 0], [0, 0]])
+        try:
+            if isinstance(bbox[0], list):
+                x_coords = [point[0] for point in bbox]
+                y_coords = [point[1] for point in bbox]
                 center_x = sum(x_coords) / len(x_coords)
                 center_y = sum(y_coords) / len(y_coords)
-                return center_x, center_y
             else:
-                x1, y1, x2, y2 = box
-                return (x1 + x2) / 2, (y1 + y2) / 2
-        elif hasattr(box, 'shape') and len(box.shape) == 2:
-            center_x = np.mean(box[:, 0])
-            center_y = np.mean(box[:, 1])
-            return center_x, center_y
-        else:
-            try:
-                box_array = np.array(box)
-                if box_array.shape == (4, 2):
-                    center_x = np.mean(box_array[:, 0])
-                    center_y = np.mean(box_array[:, 1])
-                    return center_x, center_y
-            except:
-                pass
-            return 0, 0
-    
-    def classify_texts_by_layout_regions(self, all_texts, layout_regions):
-        """
-        Phân loại text theo các layout regions (table, image, text)
-        
-        Returns:
-            dict: {
-                'free_texts': [],  # Text không thuộc vùng nào đặc biệt
-                'texts_in_tables': [],  # Text trong table regions
-                'texts_in_images': []   # Text trong image regions (sẽ bị bỏ qua)
-            }
-        """
-        # Nếu không có layout detection, tất cả text đều là free text
-        if not self.config.layout_detection or not layout_regions:
-            return {
-                'free_texts': all_texts,
-                'texts_in_tables': [],
-                'texts_in_images': []
-            }
-        
-        free_texts = []
-        texts_in_tables = []
-        texts_in_images = []
-        
-        for text_info in all_texts:
-            bbox = text_info.get('bbox', None)
-            if not bbox:
-                free_texts.append(text_info)
-                continue
-            
-            # Lấy tọa độ trung tâm của text box
-            center_x, center_y = self.get_text_box_center(bbox)
-            
-            # Kiểm tra xem center có nằm trong layout region nào không
-            assigned = False
-            
-            for layout_region in layout_regions:
-                region_bbox = layout_region['bbox']  # [x_min, y_min, x_max, y_max]
-                
-                if self.is_point_in_box((center_x, center_y), region_bbox):
-                    text_info['layout_region'] = layout_region
-                    
-                    # Phân loại theo label của region
-                    if layout_region['label'] == 'table':
-                        texts_in_tables.append(text_info)
-                    elif layout_region['label'] == 'image':
-                        texts_in_images.append(text_info)
-                    else:
-                        # Các label khác (title, text, etc.) vẫn coi là free text
-                        free_texts.append(text_info)
-                    
-                    assigned = True
-                    break
-            
-            if not assigned:
-                free_texts.append(text_info)
-        
-        return {
-            'free_texts': free_texts,
-            'texts_in_tables': texts_in_tables,
-            'texts_in_images': texts_in_images
-        }
-    
-    def save_image_region(self, image_region, output_dir, base_name, region_index):
-        """Lưu image region và trả về path"""
-        image_filename = f"{base_name}_image_{region_index + 1}.jpg"
-        image_path = os.path.join(output_dir, image_filename)
-        
-        # Lưu ảnh
-        cv2.imwrite(image_path, image_region['image'])
-        
-        return image_filename, image_path
-    
-    def create_text_blocks_from_free_texts(self, free_texts, layout_regions):
-        """
-        Tạo các text blocks từ free texts, sắp xếp theo XY-Cut và tránh overlap với layout regions
-        """
-        if not free_texts:
-            return []
-        
-        # Sử dụng XY-Cut hoặc sắp xếp đơn giản tùy theo config
-        if self.config.xy_cut_sorting:
-            sorted_free_texts = self.sort_texts_with_xycut(free_texts)
-        else:
-            sorted_free_texts = self.sort_texts_by_position(free_texts)
-        
-        # Group texts thành các blocks dựa trên khoảng cách và vị trí
-        text_blocks = []
-        current_block = []
-        current_y = None
-        y_threshold = 50  # Threshold để group texts trong cùng một "paragraph"
-        
-        for text_info in sorted_free_texts:
-            bbox = text_info.get('bbox', [[0, 0], [0, 0], [0, 0], [0, 0]])
-            _, center_y = self.get_text_box_center(bbox)
-            
-            if current_y is None or abs(center_y - current_y) > y_threshold:
-                # Bắt đầu block mới
-                if current_block:
-                    text_blocks.append(current_block)
-                current_block = [text_info]
-                current_y = center_y
-            else:
-                # Thêm vào block hiện tại
-                current_block.append(text_info)
-        
-        # Đừng quên block cuối
-        if current_block:
-            text_blocks.append(current_block)
-        
-        return text_blocks
-
-    def sort_texts_by_position(self, texts):
-        """Sắp xếp text theo vị trí từ trên xuống dưới, trái sang phải (fallback method)"""
-        def get_sort_key(text_info):
-            bbox = text_info.get('bbox', [[0, 0], [0, 0], [0, 0], [0, 0]])
-            center_x, center_y = self.get_text_box_center(bbox)
+                center_x, center_y = bbox[0], bbox[1]
             return (center_y, center_x)
-        
-        return sorted(texts, key=get_sort_key)
+        except:
+            return (0, 0)
     
-    def process_document(self, image_path: str, output_dir: str = "./output/") -> str:
-        """
-        Xử lý toàn bộ pipeline từ ảnh đầu vào đến markdown cuối với layout-aware processing
-        """
-        # Tạo thư mục output
-        os.makedirs(output_dir, exist_ok=True)
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        
-        process_start_time = time.time()
-        timing_info = {}
-        
-        # Bước 0: Orientation correction (TÙY CHỌN)
-        if self.config.orientation and self.orientation_model is not None:
-            step0_start = time.time()
-            
-            corrected_image, orientation_info = run_orientation_correction(
-                image_path, 
-                self.orientation_model
-            )
-            
-            timing_info['orientation'] = time.time() - step0_start
-            print(f"✓ Orientation correction: {timing_info['orientation']:.2f}s")
-        else:
-            # Đọc ảnh trực tiếp nếu không xử lý orientation
-            corrected_image = cv2.imread(image_path)
-            timing_info['orientation'] = 0.0
-            print("⊝ Bỏ qua orientation correction")
-        
-        # Bước 1: Tiền xử lý ảnh với OCR (LUÔN LUÔN CHẠY)
-        step1_start = time.time()
-        
-        processed_image, all_texts, all_boxes = run_det_rec_preprocess(
-            corrected_image,  # Sử dụng numpy array ảnh
-            self.ocr_model
-        )
-        
-        timing_info['ocr'] = time.time() - step1_start
-        print(f"✓ OCR processing: {timing_info['ocr']:.2f}s")
-        
-        # Lưu ảnh đã tiền xử lý
-        processed_image_path = os.path.join(output_dir, f"{base_name}_processed.jpg")
-        cv2.imwrite(processed_image_path, processed_image)
-        
-        # Bước 2: Layout detection (TÙY CHỌN)
-        layout_regions = []
-        if self.config.layout_detection and self.layout_model is not None:
-            step2_start = time.time()
-            
-            original_img, layout_regions, layout_boxes = run_layout_detection(
-                processed_image_path, 
-                self.layout_model
-            )
-            
-            timing_info['layout'] = time.time() - step2_start
-            print(f"✓ Layout detection: {timing_info['layout']:.2f}s")
-        else:
-            timing_info['layout'] = 0.0
-            print("⊝ Bỏ qua layout detection")
-        
-        # Phân loại layout regions
-        table_regions = [region for region in layout_regions if region['label'] == 'table'] if self.config.table_processing else []
-        image_regions = [region for region in layout_regions if region['label'] == 'image'] if self.config.image_extraction else []
-        other_regions = [region for region in layout_regions if region['label'] not in ['table', 'image']]
-        
-        # Bước 3: Phân loại text theo layout regions và tạo content
-        step3_start = time.time()
-        
-        text_classification = self.classify_texts_by_layout_regions(all_texts, layout_regions)
-        
-        # Bước 4: Tạo các content sections với đúng vị trí
-        content_sections = []
-        
-        # 4.1: Xử lý table regions (TÙY CHỌN)
-        if self.config.table_processing and self.cell_model is not None:
-            for i, table_region in enumerate(table_regions):
-                try:
-                    table_markdown = table_image_to_markdown(
-                        table_region['image'], 
-                        cell_model=self.cell_model
-                    )
-                    content_sections.append({
-                        'type': 'table',
-                        'content': table_markdown,
-                        'bbox': table_region['bbox'],
-                        'y_position': table_region['bbox'][1],
-                        'index': i + 1
-                    })
-                except Exception as e:
-                    print(f"Lỗi khi xử lý table {i+1}: {e}")
-                    content_sections.append({
-                        'type': 'table',
-                        'content': '<table border="1"><tr><td>Error processing table</td></tr></table>',
-                        'bbox': table_region['bbox'],
-                        'y_position': table_region['bbox'][1],
-                        'index': i + 1
-                    })
-        
-        # 4.2: Xử lý image regions (TÙY CHỌN)
-        if self.config.image_extraction:
-            for i, image_region in enumerate(image_regions):
-                try:
-                    image_filename, image_path = self.save_image_region(
-                        image_region, output_dir, base_name, i
-                    )
-                    content_sections.append({
-                        'type': 'image',
-                        'content': image_filename,
-                        'bbox': image_region['bbox'],
-                        'y_position': image_region['bbox'][1],
-                        'index': i + 1
-                    })
-                except Exception as e:
-                    print(f"Lỗi khi xử lý image {i+1}: {e}")
-        
-        # 4.3: Xử lý free text blocks (TÙY CHỌN)
-        if self.config.text_processing:
-            free_texts = text_classification['free_texts']
-            if free_texts:
-                text_blocks = self.create_text_blocks_from_free_texts(free_texts, layout_regions)
-                
-                for i, text_block in enumerate(text_blocks):
-                    # Tính vị trí trung bình của block
-                    y_positions = []
-                    for text_info in text_block:
-                        bbox = text_info.get('bbox', [[0, 0], [0, 0], [0, 0], [0, 0]])
-                        _, center_y = self.get_text_box_center(bbox)
-                        y_positions.append(center_y)
-                    
-                    avg_y = sum(y_positions) / len(y_positions) if y_positions else 0
-                    
-                    # Combine texts trong block
-                    combined_text = self.combine_texts_to_paragraphs(text_block)
-                    
-                    if combined_text.strip():
-                        content_sections.append({
-                            'type': 'text',
-                            'content': combined_text,
-                            'bbox': [0, avg_y, 1000, avg_y + 50],
-                            'y_position': avg_y,
-                            'index': i + 1
-                        })
-        
-        timing_info['processing'] = time.time() - step3_start
-        
-        # Bước 5: Sắp xếp và tạo markdown cuối
-        step5_start = time.time()
-        
-        markdown_content = self.create_layout_aware_markdown(
-            content_sections, image_path, base_name
-        )
-        
-        # Lưu file markdown
-        markdown_path = os.path.join(output_dir, f"{base_name}_result.md")
-        with open(markdown_path, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
-        
-        timing_info['markdown'] = time.time() - step5_start
-        
-        # Tổng thời gian xử lý
-        total_process_time = time.time() - process_start_time
-        
-        # In thống kê chi tiết
-        print(f"{base_name} - Orientation: {timing_info.get('orientation', 0):.2f}s | "
-              f"OCR: {timing_info['ocr']:.2f}s | "
-              f"Layout: {timing_info.get('layout', 0):.2f}s | "
-              f"Processing: {timing_info['processing']:.2f}s | "
-              f"Markdown: {timing_info['markdown']:.2f}s | "
-              f"Total: {total_process_time:.2f}s")
-        
-        return markdown_path
-    
-    def process_multiple_documents(self, image_paths: List[str], output_dir: str = "./output/") -> List[str]:
-        """Xử lý nhiều tài liệu cùng lúc với cùng một model đã load"""
-        results = []
-        total_start_time = time.time()
-        
-        for i, image_path in enumerate(image_paths, 1):
-            if not os.path.exists(image_path):
-                print(f"File không tồn tại: {image_path}")
-                continue
-                
-            try:
-                print(f"Đang xử lý ({i}/{len(image_paths)}): {os.path.basename(image_path)}")
-                result_path = self.process_document(image_path, output_dir)
-                results.append(result_path)
-                    
-            except Exception as e:
-                print(f"Lỗi khi xử lý {image_path}: {e}")
-                import traceback
-                traceback.print_exc()
-        
-        total_time = time.time() - total_start_time
-        print(f"Total processing time: {total_time:.2f}s | Documents: {len(results)}/{len(image_paths)} | Average: {total_time/max(len(results), 1):.2f}s per document")
-        
-        return results
-    
-    def convert_bbox_format(self, bbox):
-        """
-        Chuyển đổi bbox từ các format khác nhau về format [x_min, y_min, x_max, y_max]
-        """
-        try:
-            if isinstance(bbox, list) and len(bbox) == 4:
-                if isinstance(bbox[0], list):
-                    # Format: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
-                    x_coords = [point[0] for point in bbox]
-                    y_coords = [point[1] for point in bbox]
-                    result = [min(x_coords), min(y_coords), max(x_coords), max(y_coords)]
-                else:
-                    # Format: [x1, y1, x2, y2] - giả sử đây là min-max format
-                    result = bbox
-            elif hasattr(bbox, 'shape') and len(bbox.shape) == 2:
-                # Numpy array shape (4, 2)
-                x_coords = bbox[:, 0]
-                y_coords = bbox[:, 1]
-                result = [np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)]
-            else:
-                # Fallback
-                bbox_array = np.array(bbox)
-                if bbox_array.shape == (4, 2):
-                    x_coords = bbox_array[:, 0]
-                    y_coords = bbox_array[:, 1]
-                    result = [np.min(x_coords), np.min(y_coords), np.max(x_coords), np.max(y_coords)]
-                elif len(bbox_array) == 8:
-                    # Format: [x1,y1,x2,y2,x3,y3,x4,y4]
-                    result = points_to_bbox(bbox_array)
-                else:
-                    result = [0, 0, 100, 100]  # Default fallback
-            
-            # Đảm bảo tất cả giá trị là integers và >= 0
-            result = [max(0, int(x)) for x in result]
-            return result
-            
-        except Exception as e:
-            return [0, 0, 100, 100]  # Safe fallback
+    return sorted(texts_with_info, key=get_sort_key)
 
-    def sort_texts_with_xycut(self, texts):
-        """Sắp xếp text theo thứ tự đọc sử dụng XY-Cut algorithm"""
-        if not texts:
-            return []
-        
-        # Chuẩn bị dữ liệu cho XY-Cut
-        boxes = []
-        indices = list(range(len(texts)))
-        
-        for i, text_info in enumerate(texts):
-            bbox = text_info.get('bbox', [[0, 0], [0, 0], [0, 0], [0, 0]])
-            # Chuyển về format [x_min, y_min, x_max, y_max]
-            converted_bbox = self.convert_bbox_format(bbox)
-            boxes.append(converted_bbox)
-        
-        boxes = np.array(boxes, dtype=np.int32)  # Đảm bảo dtype là int32
-        indices = np.array(indices, dtype=np.int32)  # Chuyển indices thành numpy array
-        
-        # Kiểm tra dữ liệu đầu vào
-        if len(boxes) == 0:
-            return []
-        
-        try:
-            # Chạy XY-Cut để lấy thứ tự đọc
-            reading_order = []
-            recursive_xy_cut(boxes, indices, reading_order)
-            
-            # Sắp xếp texts theo thứ tự đọc
-            if reading_order:
-                sorted_texts = [texts[i] for i in reading_order]
-            else:
-                # Fallback về sắp xếp đơn giản nếu XY-Cut không trả về kết quả
-                sorted_texts = self.sort_texts_by_position(texts)
-                
-        except Exception as e:
-            print(f"XY-Cut failed, using fallback sorting: {e}")
-            # Fallback về sắp xếp đơn giản nếu XY-Cut thất bại
-            sorted_texts = self.sort_texts_by_position(texts)
-        
-        return sorted_texts
-    
-    def combine_texts_to_paragraphs(self, sorted_texts):
-        """Kết hợp texts thành paragraphs với thứ tự đọc đúng"""
-        if not sorted_texts:
-            return ""
-
-        lines = []
-        for text_info in sorted_texts:
-            text = text_info.get('text', '').strip()
-            if text:
-                lines.append(text)
-
-        return ' '.join(lines)  # Join với space cho đoạn văn tự nhiên
-    
-    def create_layout_aware_markdown(self, content_sections, original_image_path, base_name):
-        """Tạo markdown đơn giản, hiển thị giống ảnh đầu vào"""
-        markdown_lines = []
-        
-        # Sắp xếp content sections theo y_position (từ trên xuống dưới)
-        sorted_sections = sorted(content_sections, key=lambda x: x['y_position'])
-        
-        # Render từng section theo đúng thứ tự, không thêm header thừa
-        for i, section in enumerate(sorted_sections):
-            section_type = section['type']
-            content = section['content']
-            
-            if section_type == 'text':
-                # Chỉ thêm content, không có header
-                if content.strip():
-                    markdown_lines.append(content.strip())
-                    
-            elif section_type == 'table':
-                # Chỉ thêm table, không có header
-                if content.strip():
-                    markdown_lines.append(content.strip())
-                    
-            elif section_type == 'image':
-                # Chỉ thêm image, không có header
-                markdown_lines.append(f"![Image](./{content})")
-            
-            # Thêm khoảng trắng giữa các sections (trừ section cuối)
-            if i < len(sorted_sections) - 1:
-                next_type = sorted_sections[i+1]['type']
-                # Chỉ thêm dòng trống nếu loại khác nhau
-                if section_type != next_type:
-                    markdown_lines.append("")
-        
-        return '\n'.join(markdown_lines)
-
-# UTILITY FUNCTIONS
-
-def process_single_document(image_path: str, 
-                          output_dir: str = "./output/",
-                          config: Optional[ProcessingConfig] = None) -> str:
+def translate_text(text, src_lang="ja", dest_lang="vi", max_retries=3):
     """
-    Hàm tiện ích để xử lý một tài liệu đơn lẻ
+    Dịch text sử dụng Google Translate với retry mechanism
+    
+    Args:
+        text: Text cần dịch
+        src_lang: Ngôn ngữ nguồn
+        dest_lang: Ngôn ngữ đích
+        max_retries: Số lần thử lại tối đa
+        
+    Returns:
+        str: Text đã dịch
+    """
+    if not text or not text.strip():
+        return text
+    
+    translator = Translator()
+    
+    for attempt in range(max_retries):
+        try:
+            result = translator.translate(text, src=src_lang, dest=dest_lang)
+            return result.text
+        except Exception as e:
+            print(f"⚠️ Lỗi dịch lần {attempt + 1}: {str(e)}")
+            if attempt < max_retries - 1:
+                time.sleep(1)  # Đợi 1 giây trước khi thử lại
+            else:
+                print(f"❌ Không thể dịch text: '{text}', giữ nguyên text gốc")
+                return text
+    
+    return text
+
+def get_optimal_font_size(text, bbox_width, bbox_height, font_path, min_size=12, max_size=60):
+    """
+    Tính toán font size tối ưu để text vừa với bounding box
+    
+    Args:
+        text: Text cần vẽ
+        bbox_width: Chiều rộng bbox
+        bbox_height: Chiều cao bbox
+        font_path: Đường dẫn font
+        min_size: Font size tối thiểu
+        max_size: Font size tối đa
+        
+    Returns:
+        int: Font size tối ưu
+    """
+    if not text:
+        return min_size
+    
+    # Binary search để tìm font size tối ưu
+    left, right = min_size, max_size
+    optimal_size = min_size
+    
+    while left <= right:
+        mid_size = (left + right) // 2
+        try:
+            font = ImageFont.truetype(font_path, mid_size)
+            
+            # Tính kích thước text với font size hiện tại
+            bbox = font.getbbox(text)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+            
+            # Kiểm tra text có vừa trong bbox không (với margin 10%)
+            margin_width = bbox_width * 0.1
+            margin_height = bbox_height * 0.1
+            
+            if (text_width <= bbox_width - margin_width and 
+                text_height <= bbox_height - margin_height):
+                optimal_size = mid_size
+                left = mid_size + 1
+            else:
+                right = mid_size - 1
+                
+        except Exception:
+            right = mid_size - 1
+    
+    return max(optimal_size, min_size)
+
+def draw_text_on_image(image, text_infos_with_translation, font_path="C:/Windows/Fonts/times.ttf"):
+    """
+    Vẽ text đã dịch lên ảnh với nền trắng
+    
+    Args:
+        image: PIL Image object
+        text_infos_with_translation: List các text info đã có translation
+        font_path: Đường dẫn đến font
+        
+    Returns:
+        PIL Image: Ảnh đã vẽ text
+    """
+    img_with_text = image.copy()
+    draw = ImageDraw.Draw(img_with_text)
+    
+    # Kiểm tra font có tồn tại không
+    if not os.path.exists(font_path):
+        print(f"⚠️ Font không tồn tại: {font_path}")
+        print("Sử dụng font mặc định")
+        font_path = None
+    
+    for i, text_info in enumerate(text_infos_with_translation):
+        try:
+            bbox = text_info['bbox']
+            translated_text = text_info.get('translated_text', text_info['text'])
+            
+            # Convert bbox
+            if len(bbox) == 4 and not isinstance(bbox[0], list):
+                x_min, y_min, x_max, y_max = bbox
+            else:
+                converted = convert_bbox_to_xycut_format(bbox)
+                x_min, y_min, x_max, y_max = converted
+            
+            # Tính kích thước bbox
+            bbox_width = x_max - x_min
+            bbox_height = y_max - y_min
+            
+            if bbox_width <= 0 or bbox_height <= 0:
+                continue
+            
+            # Vẽ nền trắng
+            draw.rectangle([x_min, y_min, x_max, y_max], fill='white', outline=None)
+            
+            # Tính font size tối ưu
+            if font_path and os.path.exists(font_path):
+                optimal_font_size = get_optimal_font_size(
+                    translated_text, bbox_width, bbox_height, font_path
+                )
+                font = ImageFont.truetype(font_path, optimal_font_size)
+            else:
+                # Sử dụng font mặc định nếu không tìm thấy font
+                try:
+                    font = ImageFont.load_default()
+                except:
+                    continue
+            
+            # Tính vị trí để center text
+            text_bbox = draw.textbbox((0, 0), translated_text, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+            
+            # Center text trong bbox
+            text_x = x_min + (bbox_width - text_width) // 2
+            text_y = y_min + (bbox_height - text_height) // 2
+            
+            # Đảm bảo text không vượt ra ngoài bbox
+            text_x = max(x_min, min(text_x, x_max - text_width))
+            text_y = max(y_min, min(text_y, y_max - text_height))
+            
+            # Vẽ text
+            draw.text((text_x, text_y), translated_text, fill='black', font=font)
+            
+            # Vẽ viền để debug (tùy chọn)
+            if text_info.get('is_merged', False):
+                draw.rectangle([x_min, y_min, x_max, y_max], outline='red', width=2)
+            else:
+                draw.rectangle([x_min, y_min, x_max, y_max], outline='blue', width=1)
+                
+        except Exception as e:
+            print(f"⚠️ Lỗi vẽ text {i}: {str(e)}")
+            continue
+    
+    return img_with_text
+
+def process_image_with_translation(image_input, 
+                                   src_lang="ja",
+                                   dest_lang="vi",
+                                   output_json_path=None,
+                                   save_debug_image=False,
+                                   save_translated_image=True,
+                                   font_path="C:/Windows/Fonts/times.ttf"):
+    """
+    Main function: Xử lý ảnh OCR, gộp box, dịch text và vẽ lên ảnh
+    
+    Args:
+        image_input: Đường dẫn ảnh hoặc numpy array
+        src_lang: Ngôn ngữ nguồn (mặc định "ja")
+        dest_lang: Ngôn ngữ đích (mặc định "vi")
+        output_json_path: Đường dẫn lưu JSON
+        save_debug_image: Có lưu ảnh debug không
+        save_translated_image: Có lưu ảnh đã dịch không
+        font_path: Đường dẫn font
+        
+    Returns:
+        dict: Kết quả xử lý
+    """
+    # Khởi tạo OCR
+    ocr = PaddleOCR(
+        use_doc_orientation_classify=False,
+        use_doc_unwarping=False,
+        use_textline_orientation=False,
+        text_recognition_model_name="PP-OCRv5_server_rec",
+        text_detection_model_name="PP-OCRv5_server_det",
+    )
+    
+    # Kiểm tra input
+    if isinstance(image_input, str):
+        if not os.path.exists(image_input):
+            raise FileNotFoundError(f"Ảnh không tồn tại: {image_input}")
+        input_data = image_input
+        base_name = os.path.splitext(os.path.basename(image_input))[0]
+        # Load ảnh cho việc vẽ
+        original_image = Image.open(image_input)
+    elif isinstance(image_input, np.ndarray):
+        input_data = image_input
+        base_name = "image_array"
+        # Convert numpy array sang PIL Image
+        if len(image_input.shape) == 3:
+            original_image = Image.fromarray(cv2.cvtColor(image_input, cv2.COLOR_BGR2RGB))
+        else:
+            original_image = Image.fromarray(image_input)
+    else:
+        raise TypeError("image_input phải là đường dẫn hoặc numpy array")
+    
+    # Tạo thư mục output
+    output_dir = "./output"
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Chạy OCR
+    print("🔍 Đang chạy OCR...")
+    result = ocr.predict(input=input_data)
+    
+    # Extract text information
+    all_texts_with_info = []
+    for res in result:
+        texts = res.get("rec_texts", [])
+        scores = res.get("rec_scores", [])
+        boxes = res.get("dt_polys", [])
+        
+        for text, score, box in zip(texts, scores, boxes):
+            text_info = {
+                'text': text,
+                'confidence': float(score),
+                'bbox': box.tolist() if hasattr(box, 'tolist') else box
+            }
+            all_texts_with_info.append(text_info)
+    
+    print(f"📊 Tìm thấy {len(all_texts_with_info)} text boxes ban đầu")
+    
+    # Tìm và gộp các box chồng lên nhau
+    print("🔄 Đang gộp các box chồng lên nhau...")
+    overlapping_groups = find_overlapping_groups(all_texts_with_info)
+    merged_texts = merge_overlapping_boxes(all_texts_with_info, overlapping_groups)
+    
+    # Sắp xếp toàn bộ kết quả theo XY-Cut
+    print("📝 Đang sắp xếp text theo thứ tự đọc...")
+    final_sorted_texts = sort_texts_with_xycut(merged_texts)
+    
+    # Dịch text
+    print(f"🌍 Đang dịch text từ {src_lang} sang {dest_lang}...")
+    for i, text_info in enumerate(final_sorted_texts):
+        original_text = text_info['text']
+        print(f"Đang dịch {i+1}/{len(final_sorted_texts)}: {original_text[:50]}...")
+        
+        translated_text = translate_text(original_text, src_lang, dest_lang)
+        text_info['translated_text'] = translated_text
+        text_info['original_text'] = original_text
+        text_info['src_lang'] = src_lang
+        text_info['dest_lang'] = dest_lang
+        
+        # time.sleep(0.1)  # Tránh spam API
+    
+    print("✅ Hoàn thành dịch text")
+    
+    # Thống kê
+    merged_count = sum(1 for group in overlapping_groups if len(group) > 1)
+    total_merged_boxes = sum(len(group) for group in overlapping_groups if len(group) > 1)
+    
+    print(f"📈 Kết quả gộp box:")
+    print(f"- Box ban đầu: {len(all_texts_with_info)}")
+    print(f"- Nhóm gộp: {merged_count}")
+    print(f"- Box cuối cùng: {len(final_sorted_texts)}")
+    
+    # Chuẩn bị output data
+    output_data = {
+        'metadata': {
+            'total_original_boxes': len(all_texts_with_info),
+            'total_merged_groups': merged_count,
+            'total_final_boxes': len(final_sorted_texts),
+            'source_language': src_lang,
+            'target_language': dest_lang,
+            'processing_timestamp': __import__('datetime').datetime.now().isoformat()
+        },
+        'texts': []
+    }
+    
+    # Add text data
+    for i, text_info in enumerate(final_sorted_texts):
+        text_data = {
+            'index': i,
+            'original_text': text_info['original_text'],
+            'translated_text': text_info['translated_text'],
+            'confidence': text_info['confidence'],
+            'bbox': text_info['bbox'],
+            'is_merged': text_info.get('is_merged', False)
+        }
+        
+        if text_info.get('is_merged', False):
+            text_data['merged_from_count'] = text_info['merged_from_count']
+            text_data['original_texts'] = text_info['original_texts']
+        
+        output_data['texts'].append(text_data)
+    
+    # Combined text (cả gốc và dịch)
+    output_data['combined_original_text'] = " ".join([t['original_text'] for t in final_sorted_texts])
+    output_data['combined_translated_text'] = " ".join([t['translated_text'] for t in final_sorted_texts])
+    
+    # Lưu JSON
+    if output_json_path is None:
+        output_json_path = os.path.join(output_dir, f"{base_name}_translated_ocr_result.json")
+    else:
+        output_json_path = os.path.join(output_dir, output_json_path)
+    
+    with open(output_json_path, 'w', encoding='utf-8') as f:
+        json.dump(output_data, f, ensure_ascii=False, indent=2)
+    
+    print(f"💾 Đã lưu kết quả JSON vào: {output_json_path}")
+    
+    # Vẽ text dịch lên ảnh
+    if save_translated_image:
+        print("🎨 Đang vẽ text dịch lên ảnh...")
+        translated_image = draw_text_on_image(original_image, final_sorted_texts, font_path)
+        
+        # Lưu ảnh đã dịch
+        translated_image_path = os.path.join(output_dir, f"{base_name}_translated.jpg")
+        translated_image.save(translated_image_path, quality=95)
+        print(f"🖼️ Đã lưu ảnh dịch vào: {translated_image_path}")
+    
+    # Lưu ảnh debug nếu cần
+    if save_debug_image and isinstance(image_input, str):
+        debug_image_path = os.path.join(output_dir, f"{base_name}_debug_boxes.jpg")
+        save_debug_visualization(image_input, final_sorted_texts, debug_image_path)
+        print(f"🖼️ Đã lưu ảnh debug vào: {debug_image_path}")
+    
+    return output_data
+
+def save_debug_visualization(image_path, text_infos, output_path):
+    """Lưu ảnh visualization để debug"""
+    img = cv2.imread(image_path)
+    if img is None:
+        return
+    
+    # Vẽ bounding boxes
+    for i, text_info in enumerate(text_infos):
+        bbox = text_info['bbox']
+        
+        # Convert bbox to rectangle points
+        if len(bbox) == 4 and not isinstance(bbox[0], list):
+            # Format [x_min, y_min, x_max, y_max]
+            x1, y1, x2, y2 = bbox
+            pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.int32)
+        else:
+            # Other formats
+            converted = convert_bbox_to_xycut_format(bbox)
+            x1, y1, x2, y2 = converted
+            pts = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], np.int32)
+        
+        # Chọn màu: đỏ cho merged box, xanh cho single box
+        color = (0, 0, 255) if text_info.get('is_merged', False) else (0, 255, 0)
+        thickness = 3 if text_info.get('is_merged', False) else 2
+        
+        cv2.polylines(img, [pts], True, color, thickness)
+        
+        # Vẽ số thứ tự
+        cv2.putText(img, str(i), (int(x1), int(y1)-10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    
+    cv2.imwrite(output_path, img)
+
+# Test function
+def test_ocr_translation():
+    """Test function với dịch thuật"""
+    image_path = "./cropped_boxes/Chap189-Page011.jpg"  # Thay đổi path này
+    
+    if os.path.exists(image_path):
+        print("=== TEST OCR + TRANSLATION + TEXT OVERLAY ===")
+        
+        # Test dịch từ tiếng Nhật sang tiếng Việt
+        print("\n🇯🇵➡️🇻🇳 Xử lý ảnh: Nhật → Việt")
+        result = process_image_with_translation(
+            image_path,
+            src_lang="ja",
+            dest_lang="vi", 
+            output_json_path="translated_ja_to_vi.json",
+            save_debug_image=True,
+            save_translated_image=True,
+            font_path="C:/Windows/Fonts/times.ttf"  # Hoặc arial.ttf
+        )
+        
+        print(f"\n📈 Kết quả:")
+        print(f"- Box ban đầu: {result['metadata']['total_original_boxes']}")
+        print(f"- Nhóm gộp: {result['metadata']['total_merged_groups']}")
+        print(f"- Box cuối cùng: {result['metadata']['total_final_boxes']}")
+        
+        print(f"\n📝 Text gốc (Nhật):")
+        original_text = result['combined_original_text'][:200] + "..." if len(result['combined_original_text']) > 200 else result['combined_original_text']
+        print(original_text)
+        
+        print(f"\n📝 Text dịch (Việt):")
+        translated_text = result['combined_translated_text'][:200] + "..." if len(result['combined_translated_text']) > 200 else result['combined_translated_text']
+        print(translated_text)
+        
+        print(f"\n💾 Tất cả file output:")
+        print(f"- JSON: ./output/translated_ja_to_vi.json")
+        print(f"- Ảnh dịch: ./output/{os.path.splitext(os.path.basename(image_path))[0]}_translated.jpg")
+        print(f"- Ảnh debug: ./output/{os.path.splitext(os.path.basename(image_path))[0]}_debug_boxes.jpg")
+        
+        # In chi tiết vài text đầu tiên
+        print(f"\n🔍 Chi tiết 3 text đầu tiên:")
+        for i, text_data in enumerate(result['texts'][:3]):
+            print(f"{i+1}. Gốc: '{text_data['original_text']}'")
+            print(f"   Dịch: '{text_data['translated_text']}'")
+            print(f"   Confidence: {text_data['confidence']:.3f}")
+            print(f"   Merged: {text_data['is_merged']}")
+            print()
+        
+    else:
+        print(f"❌ File {image_path} không tồn tại")
+        print("Tạo thư mục cropped_boxes/ và đặt ảnh test vào đó")
+
+def test_other_languages():
+    """Test với các ngôn ngữ khác"""
+    image_path = "./test_images/sample.jpg"  # Thay path phù hợp
+    
+    if os.path.exists(image_path):
+        print("=== TEST CÁC NGÔN NGỮ KHÁC ===")
+        
+        # Test Trung → Việt
+        print("\n🇨🇳➡️🇻🇳 Trung Quốc → Việt Nam")
+        process_image_with_translation(
+            image_path,
+            src_lang="zh",
+            dest_lang="vi",
+            output_json_path="translated_zh_to_vi.json"
+        )
+        
+        # Test Hàn → Việt  
+        print("\n🇰🇷➡️🇻🇳 Hàn Quốc → Việt Nam")
+        process_image_with_translation(
+            image_path,
+            src_lang="ko", 
+            dest_lang="vi",
+            output_json_path="translated_ko_to_vi.json"
+        )
+        
+        # Test Anh → Việt
+        print("\n🇺🇸➡️🇻🇳 Tiếng Anh → Việt Nam") 
+        process_image_with_translation(
+            image_path,
+            src_lang="en",
+            dest_lang="vi",
+            output_json_path="translated_en_to_vi.json"
+        )
+
+def quick_translate_image(image_path, src_lang="ja", dest_lang="vi"):
+    """
+    Hàm nhanh để dịch ảnh với tham số tối thiểu
     
     Args:
         image_path: Đường dẫn ảnh
-        output_dir: Thư mục output
-        config: Cấu hình xử lý (None = full config)
+        src_lang: Ngôn ngữ nguồn
+        dest_lang: Ngôn ngữ đích
+        
+    Returns:
+        str: Đường dẫn ảnh đã dịch
     """
-    processor = DocumentProcessor(config)
-    return processor.process_document(image_path, output_dir)
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Ảnh không tồn tại: {image_path}")
+    
+    print(f"🚀 Dịch nhanh: {src_lang} → {dest_lang}")
+    
+    result = process_image_with_translation(
+        image_path,
+        src_lang=src_lang,
+        dest_lang=dest_lang,
+        save_debug_image=False,
+        save_translated_image=True
+    )
+    
+    base_name = os.path.splitext(os.path.basename(image_path))[0]
+    translated_image_path = f"./output/{base_name}_translated.jpg"
+    
+    print(f"✅ Hoàn thành! Ảnh dịch: {translated_image_path}")
+    return translated_image_path
 
-def process_multiple_documents_optimized(image_paths: List[str], 
-                                       output_dir: str = "./output/",
-                                       config: Optional[ProcessingConfig] = None) -> List[str]:
+# Các hàm tiện ích
+def batch_translate_images(image_folder, src_lang="ja", dest_lang="vi"):
     """
-    Hàm tiện ích để xử lý nhiều tài liệu với model chỉ load một lần
+    Dịch hàng loạt ảnh trong folder
     
     Args:
-        image_paths: List đường dẫn ảnh
-        output_dir: Thư mục output  
-        config: Cấu hình xử lý (None = full config)
+        image_folder: Đường dẫn folder chứa ảnh
+        src_lang: Ngôn ngữ nguồn  
+        dest_lang: Ngôn ngữ đích
     """
-    processor = DocumentProcessor(config)  # Load model chỉ một lần
-    return processor.process_multiple_documents(image_paths, output_dir)
-
-# CÁCH SỬ DỤNG:
+    if not os.path.exists(image_folder):
+        print(f"❌ Folder không tồn tại: {image_folder}")
+        return
+    
+    # Tìm tất cả ảnh trong folder
+    image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+    image_files = []
+    
+    for file in os.listdir(image_folder):
+        if any(file.lower().endswith(ext) for ext in image_extensions):
+            image_files.append(os.path.join(image_folder, file))
+    
+    if not image_files:
+        print(f"❌ Không tìm thấy ảnh nào trong {image_folder}")
+        return
+    
+    print(f"📁 Tìm thấy {len(image_files)} ảnh để dịch")
+    print(f"🌍 Dịch từ {src_lang} sang {dest_lang}")
+    
+    successful = 0
+    failed = 0
+    
+    for i, image_path in enumerate(image_files):
+        try:
+            print(f"\n📸 Đang xử lý {i+1}/{len(image_files)}: {os.path.basename(image_path)}")
+            
+            quick_translate_image(image_path, src_lang, dest_lang)
+            successful += 1
+            
+        except Exception as e:
+            print(f"❌ Lỗi xử lý {os.path.basename(image_path)}: {str(e)}")
+            failed += 1
+    
+    print(f"\n📊 Kết quả batch translation:")
+    print(f"✅ Thành công: {successful}")
+    print(f"❌ Thất bại: {failed}")
+    print(f"📁 Tất cả kết quả trong folder: ./output/")
 
 if __name__ == "__main__":
-    # Danh sách các ảnh test
-    test_images = [
-        # "./anh_test/1.jpg",
-        # "./anh_test/2.jpg", 
-        # "./anh_test/3.jpg",
-        # "./anh_test/4.jpg",
-        # "./anh_test/5.jpg",
-        # "./anh_test/6.jpg",
-        # "./anh_test/7.jpg",
-        # "./anh_test/8.jpg",
-        # "./anh_test/9.jpg",
-        # "./anh_test/10.jpg",
-        # "./anh_test/11.jpg",
-        "./cropped_boxes/1-6558c6a907fd2.jpg"
-    ]
+    # Chạy test cơ bản
+    test_ocr_translation()
     
-    # Lọc chỉ các file tồn tại
-    existing_images = [img for img in test_images if os.path.exists(img)]
+    # Uncomment để test các ngôn ngữ khác
+    # test_other_languages()
     
-    if not existing_images:
-        print("No valid image files found!")
-        exit()
-    
-    print(f"Tìm thấy {len(existing_images)} ảnh để xử lý")
-    
-    # ===== CÁC CÁCH SỬ DỤNG =====
-    
-    # # Cách 1: Sử dụng config đầy đủ (mặc định)
-    # print("\n=== FULL CONFIG ===")
-    # config_full = ProcessingConfig.full_config()
-    # processor_full = DocumentProcessor(config_full)
-    # results_full = processor_full.process_multiple_documents(existing_images[:2], "./output/full/")
-    
-    # # Cách 2: Chỉ OCR cơ bản (nhanh nhất)
-    # print("\n=== MINIMAL CONFIG (OCR only) ===")
-    # config_minimal = ProcessingConfig.minimal_config()
-    # processor_minimal = DocumentProcessor(config_minimal)
-    # results_minimal = processor_minimal.process_multiple_documents(existing_images[:2], "./output/minimal/")
-    
-    # # Cách 3: Chỉ xử lý text (không table/image)
-    # print("\n=== TEXT ONLY CONFIG ===")
-    # config_text_only = ProcessingConfig.text_only_config()
-    # processor_text = DocumentProcessor(config_text_only)
-    # results_text = processor_text.process_multiple_documents(existing_images[:2], "./output/text_only/")
-    
-    # Cách 4: Custom config - tùy chỉnh từng module
-    print("\n=== CUSTOM CONFIG ===")
-    config_custom = ProcessingConfig(
-        orientation=False,           # Bật xác định hướng
-        layout_detection=False,      # Bật phát hiện layout
-        table_processing=False,     # TẮT xử lý bảng (nếu không cần)
-        text_processing=True,       # Bật xử lý text
-        image_extraction=True,      # Bật trích xuất ảnh
-        xy_cut_sorting=True         # Bật sắp xếp XY-Cut
-    )
-    processor_custom = DocumentProcessor(config_custom)
-    results_custom = processor_custom.process_multiple_documents(existing_images[:2], "./output/custom/")
-    
-    # # Cách 5: Xử lý từng file với config khác nhau
-    # print("\n=== INDIVIDUAL PROCESSING ===")
-    
-    # # File 1: Full processing
-    # if len(existing_images) > 0:
-    #     result1 = process_single_document(
-    #         existing_images[0], 
-    #         "./output/individual/", 
-    #         ProcessingConfig.full_config()
-    #     )
-    #     print(f"File 1 (full): {result1}")
-    
-    # # File 2: Text only
-    # if len(existing_images) > 1:
-    #     result2 = process_single_document(
-    #         existing_images[1], 
-    #         "./output/individual/", 
-    #         ProcessingConfig.text_only_config()
-    #     )
-    #     print(f"File 2 (text only): {result2}")
-    
-    # # File 3: Minimal
-    # if len(existing_images) > 2:
-    #     result3 = process_single_document(
-    #         existing_images[2], 
-    #         "./output/individual/", 
-    #         ProcessingConfig.minimal_config()
-    #     )
-    #     print(f"File 3 (minimal): {result3}")
-    
-    print(f"\nHoàn thành! Kiểm tra các thư mục output để xem kết quả.")
-    print("- ./output/full/ : Xử lý đầy đủ tất cả modules")
-    print("- ./output/minimal/ : Chỉ OCR cơ bản")
-    print("- ./output/text_only/ : Chỉ xử lý text (không table/image)")
-    print("- ./output/custom/ : Cấu hình tùy chỉnh")
-    print("- ./output/individual/ : Xử lý từng file với config khác nhau")
-
-#     # ===== BENCHMARK PERFORMANCE =====
-#     print("\n=== PERFORMANCE COMPARISON ===")
-    
-#     if len(existing_images) > 0:
-#         test_image = existing_images[0]
-        
-#         # Test minimal config
-#         import time
-        
-#         start = time.time()
-#         process_single_document(test_image, "./output/benchmark/", ProcessingConfig.minimal_config())
-#         minimal_time = time.time() - start
-        
-#         start = time.time()
-#         process_single_document(test_image, "./output/benchmark/", ProcessingConfig.full_config())
-#         full_time = time.time() - start
-        
-#         print(f"Minimal config: {minimal_time:.2f}s")
-#         print(f"Full config: {full_time:.2f}s")
-#         print(f"Speed improvement: {full_time/minimal_time:.1f}x faster với minimal config")
-
-# # ===== CÁC CONFIG MẪU THÊM =====
-
-# class ProcessingConfigExtended(ProcessingConfig):
-#     """Extended config với nhiều tùy chọn hơn"""
-    
-#     @classmethod
-#     def document_scan_config(cls):
-#         """Config cho scan tài liệu văn phòng - ưu tiên text và table"""
-#         return cls(
-#             orientation=True,
-#             layout_detection=True,
-#             table_processing=True,
-#             text_processing=True,
-#             image_extraction=False,  # Ít quan trọng với doc scan
-#             xy_cut_sorting=True
-#         )
-    
-#     @classmethod
-#     def magazine_config(cls):
-#         """Config cho tạp chí/brochure - ưu tiên layout và image"""
-#         return cls(
-#             orientation=True,
-#             layout_detection=True,
-#             table_processing=False,  # Ít table trong tạp chí
-#             text_processing=True,
-#             image_extraction=True,   # Quan trọng với tạp chí
-#             xy_cut_sorting=True
-#         )
-    
-#     @classmethod
-#     def speed_optimized_config(cls):
-#         """Config tối ưu tốc độ - chỉ OCR + text cơ bản"""
-#         return cls(
-#             orientation=False,       # Bỏ qua orientation để tăng tốc
-#             layout_detection=False,  # Bỏ qua layout detection
-#             table_processing=False,
-#             text_processing=True,
-#             image_extraction=False,
-#             xy_cut_sorting=False     # Dùng sort đơn giản
-#         )
-    
-#     @classmethod
-#     def table_focused_config(cls):
-#         """Config tập trung vào bảng"""
-#         return cls(
-#             orientation=True,
-#             layout_detection=True,   # Cần thiết để detect table
-#             table_processing=True,
-#             text_processing=True,    # Vẫn cần text xung quanh table
-#             image_extraction=False,
-#             xy_cut_sorting=True
-#         )
+    # Uncomment để test batch processing
+    # batch_translate_images("./test_images/", "ja", "vi")
