@@ -19,7 +19,7 @@ def get_ocr_instance():
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
-            text_recognition_model_dir="./PP-OCRv5_server_rec_infer",
+            # text_recognition_model_dir="./PP-OCRv5_server_rec_infer",
             text_recognition_model_name="PP-OCRv5_server_rec",
             text_detection_model_name="PP-OCRv5_server_det",
         )

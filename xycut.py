@@ -100,6 +100,7 @@ def recursive_xy_cut(boxes: np.ndarray, indices: List[int], res: List[int]):
         y_sorted_indices_chunk = y_sorted_indices[_indices]
 
         _indices = y_sorted_boxes_chunk[:, 0].argsort()
+        # _indices = y_sorted_boxes_chunk[:, 0].argsort()[::-1]
         x_sorted_boxes_chunk = y_sorted_boxes_chunk[_indices]
         x_sorted_indices_chunk = y_sorted_indices_chunk[_indices]
 
